@@ -72,8 +72,13 @@ RGParseResult rg_parse_days(const char *input, double *out, RGDateFilter *filter
     if (fabs(value) > RG_FILTER_MAX_DAYS) return RGParseTooLarge;
 
     if (out) *out = value;
-    if (filter) *filter = rg_filter_make(value);
 
+    if (value != 0 && fabs(value) < RG_FILTER_MIN_DAYS) {
+        if (filter) *filter = rg_filter_make(0);
+        return RGParseTooSmall;
+    }
+
+    if (filter) *filter = rg_filter_make(value);
     if (value == 0) return RGParseZero;
     return RGParseOK;
 }
