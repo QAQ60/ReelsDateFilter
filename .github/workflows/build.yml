@@ -1,0 +1,37 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: |
+          brew install ldid xz
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          make clean || true
+          make -j4
+          echo "--- artifacts ---"
+          find .theos -name "*.dylib" -print
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReelsDateFilter-dylib
+          path: |
+            .theos/obj/**/*.dylib
+            .theos/obj/*.dylib
+          if-no-files-found: error
