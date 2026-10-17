@@ -16,6 +16,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     RGDateFilterOff = 0,
     RGDateFilterNewer,   /* 只看最近 N 天 */
@@ -57,5 +61,9 @@ int rg_filter_should_keep(RGDateFilter filter, double age_seconds);
  * 当一页作品全部被过滤时，客户端应停止自动翻页，
  * 否则会无限请求下一页。返回 1 = 应停止自动翻页。 */
 int rg_should_stop_pagination(RGDateFilter filter, size_t page_count, size_t kept_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RG_DATE_FILTER_H */
