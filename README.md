@@ -11,7 +11,7 @@
 
 **TrollFools / 自签注入（推荐）**
 
-把 `ReelsDateFilter.dylib` 注入 Instagram 的 IPA 即可，无需改 plist。安装后打开任意个人主页，右上角会出现紫色的「时间过滤」按钮。
+把 `ReelsDateFilter.dylib` 注入 Instagram 的 IPA 即可，无需改 plist。安装后打开 Instagram 的设置页，导航栏右上角会出现「时间过滤」按钮，不再有悬浮元素。
 
 **越狱**
 
@@ -24,8 +24,8 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 
 ## 用法
 
-1. 打开某个账号的主页，切到「短片」标签
-2. 点右上角「时间过滤」
+1. 打开 Instagram 设置（个人主页右上角菜单 → 设置）
+2. 点导航栏右上角「时间过滤」
 3. 弹出提示，点「前往输入」
 4. 输入天数，保存后列表立即收缩，按钮变成「10 天内」
 
@@ -52,7 +52,7 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 - **没有在真机上验证过。** 代码用 Instagram 449 的类名编写（`IGSundialGridVideoViewController`、`objectsForListAdapter:`、`media.takenAtDate`），编译通过，但 hook 是否命中取决于你设备上的 IG 版本。看日志里有没有 `[RDF] hooked` 即可判断。
 - 如果某天 IG 改了数据源实现，过滤会静默失效，按钮仍在，列表不变。
 - 分页由 IGListKit 自己管；当前页全被过滤时可能不再自动加载下一页，需要手动下拉。
-- 按钮位置是固定偏移，某些 IG 版本上可能压到导航栏。
+- 设置页类名必须含 `Setting`，否则按钮不会出现；看日志里有没有 `settings class hooked`。
 
 ## 构建
 

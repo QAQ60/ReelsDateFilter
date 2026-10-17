@@ -10,10 +10,12 @@
 static NSString *const kRDFDaysKey = @"RDFDays";
 
 static char kRDFOrigIMPKey;
-static char kRDFPillKey;
+static char kRDFEntryKey;
+static NSString *const kRDFHostKey = @"rdf.host";
+
+static UIViewController *RDFTopViewController(void);
 
 static __weak id gRDFLastAdapter;
-static __weak UIViewController *gRDFLastProfile;
 
 #pragma mark - Instagram surface (declared, not implemented here)
 
@@ -174,18 +176,10 @@ static void RDFReloadLists(void)
 
 #pragma mark - Settings sheet
 
-static NSString *RDFTitleForCurrentValue(void)
-{
-    double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
-    if (fabs(days) < 0.0001) return @"时间过滤";
-    if (days > 0) return [NSString stringWithFormat:@"%@ 天内", [NSString stringWithFormat:@"%g", days]];
-    return [NSString stringWithFormat:@"%g 天以前", fabs(days)];
-}
-
 @interface RDFConfigurator : NSObject
 + (instancetype)shared;
 - (void)presentFrom:(UIViewController *)host;
-- (void)pillTapped:(UIButton *)sender;
+- (void)settingsTapped:(UIBarButtonItem *)sender;
 @end
 
 @implementation RDFConfigurator
@@ -291,61 +285,114 @@ static NSString *RDFTitleForCurrentValue(void)
     [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kRDFDaysKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    UIButton *pill = objc_getAssociatedObject(host, &kRDFPillKey);
-    if (!pill) pill = objc_getAssociatedObject(host.view, &kRDFPillKey);
-    [pill setTitle:RDFTitleForCurrentValue() forState:UIControlStateNormal];
-
     RDFReloadLists();
 }
 
-- (void)pillTapped:(UIButton *)sender
+- (void)settingsTapped:(UIBarButtonItem *)sender
 {
-    UIViewController *host = gRDFLastProfile;
-    if (!host) {
-        UIResponder *responder = sender;
-        while (responder && ![responder isKindOfClass:[UIViewController class]]) {
-            responder = [responder nextResponder];
-        }
-        host = (UIViewController *)responder;
-    }
-    [self presentFrom:host];
+    UIViewController *host = objc_getAssociatedObject(sender, kRDFHostKey.UTF8String);
+    [self presentFrom:host ?: RDFTopViewController()];
 }
 
 @end
 
-#pragma mark - Entry pill
+#pragma mark - Entry (Instagram settings)
 
-static void RDFAttachPill(UIViewController *controller)
+static UIViewController *RDFTopViewController(void)
 {
-    if (!controller || !controller.view) return;
-    if (objc_getAssociatedObject(controller, &kRDFPillKey)) return;
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            if (candidate.isKeyWindow) { window = candidate; break; }
+        }
+    }
+    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
 
-    UIButton *pill = [UIButton buttonWithType:UIButtonTypeSystem];
-    pill.backgroundColor = [UIColor colorWithRed:0.49 green:0.23 blue:0.93 alpha:0.92];
-    [pill setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    pill.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    pill.layer.cornerRadius = 15;
-    pill.clipsToBounds = YES;
-    [pill setTitle:RDFTitleForCurrentValue() forState:UIControlStateNormal];
-    [pill addTarget:[RDFConfigurator shared]
-             action:@selector(pillTapped:)
-   forControlEvents:UIControlEventTouchUpInside];
+    UIViewController *controller = window.rootViewController;
+    while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+        controller = controller.presentedViewController;
+    }
+    return controller;
+}
 
-    CGFloat top = controller.view.safeAreaInsets.top + 54;
-    CGFloat width = 86;
-    pill.frame = CGRectMake(controller.view.bounds.size.width - width - 12, top, width, 30);
-    pill.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
+static void RDFAddSettingsEntry(UIViewController *controller)
+{
+    if (!controller) return;
+    NSString *name = NSStringFromClass([controller class]);
+    if ([name rangeOfString:@"Setting" options:NSCaseInsensitiveSearch].location == NSNotFound) return;
 
-    [controller.view addSubview:pill];
-    objc_setAssociatedObject(controller, &kRDFPillKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UINavigationItem *navigationItem = controller.navigationItem;
+    if (!navigationItem) return;
+    if (objc_getAssociatedObject(controller, &kRDFEntryKey)) return;
 
-    NSLog(@"[RDF] pill attached to %@", NSStringFromClass([controller class]));
+    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithTitle:@"时间过滤"
+                                                             style:UIBarButtonItemStylePlain
+                                                            target:[RDFConfigurator shared]
+                                                            action:@selector(settingsTapped:)];
+    objc_setAssociatedObject(item, kRDFHostKey.UTF8String, controller, OBJC_ASSOCIATION_ASSIGN);
+
+    NSMutableArray *items = [navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
+    [items insertObject:item atIndex:0];
+    navigationItem.rightBarButtonItems = items;
+
+    objc_setAssociatedObject(controller, &kRDFEntryKey, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSLog(@"[RDF] settings entry added to %@", name);
+}
+
+static IMP gRDFOriginalAppear;
+
+static void RDFAppearHook(id self, SEL _cmd, BOOL animated)
+{
+    if (gRDFOriginalAppear) {
+        ((void (*)(id, SEL, BOOL))gRDFOriginalAppear)(self, _cmd, animated);
+    }
+    RDFAddSettingsEntry(self);
+}
+
+// Settings controllers that override viewDidAppear: and skip super need their
+// own hook; a UIViewController-level swizzle alone would miss them.
+static void RDFHookSettingsClasses(void)
+{
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    if (!classes) return;
+    count = objc_getClassList(classes, count);
+
+    for (int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        NSString *name = NSStringFromClass(cls);
+        if ([name rangeOfString:@"Setting" options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+
+        SEL selector = @selector(viewDidAppear:);
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        BOOL owns = NO;
+        for (unsigned int j = 0; j < methodCount; j++) {
+            if (sel_isEqual(method_getName(methods[j]), selector)) { owns = YES; break; }
+        }
+        free(methods);
+        if (!owns) continue;
+
+        Method method = class_getInstanceMethod(cls, selector);
+        if (!method) continue;
+
+        IMP original = method_getImplementation(method);
+        IMP replacement = imp_implementationWithBlock(^(id receiver, BOOL animated) {
+            ((void (*)(id, SEL, BOOL))original)(receiver, selector, animated);
+            RDFAddSettingsEntry(receiver);
+        });
+        method_setImplementation(method, replacement);
+        NSLog(@"[RDF] settings class hooked: %@", name);
+    }
+    free(classes);
 }
 
 #pragma mark - Manual hooks (no CydiaSubstrate dependency)
 
 static IMP gRDFOriginalSetDataSource;
-static IMP gRDFOriginalViewDidAppear;
 
 static void RDFSetDataSourceHook(id self, SEL _cmd, id dataSource)
 {
@@ -354,15 +401,6 @@ static void RDFSetDataSourceHook(id self, SEL _cmd, id dataSource)
     }
     gRDFLastAdapter = self;
     RDFInstallDataSource(dataSource);
-}
-
-static void RDFViewDidAppearHook(id self, SEL _cmd, BOOL animated)
-{
-    if (gRDFOriginalViewDidAppear) {
-        ((void (*)(id, SEL, BOOL))gRDFOriginalViewDidAppear)(self, _cmd, animated);
-    }
-    gRDFLastProfile = self;
-    RDFAttachPill(self);
 }
 
 __attribute__((constructor))
@@ -379,14 +417,11 @@ static void RDFInitialize(void)
         }
     }
 
-    Class profileClass = objc_getClass("IGProfileViewController");
-    if (profileClass) {
-        SEL selector = @selector(viewDidAppear:);
-        Method method = class_getInstanceMethod(profileClass, selector);
-        if (method) {
-            gRDFOriginalViewDidAppear = method_getImplementation(method);
-            method_setImplementation(method, (IMP)RDFViewDidAppearHook);
-            NSLog(@"[RDF] installed viewDidAppear: hook");
-        }
+    Method appear = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
+    if (appear) {
+        gRDFOriginalAppear = method_getImplementation(appear);
+        method_setImplementation(appear, (IMP)RDFAppearHook);
     }
+
+    RDFHookSettingsClasses();
 }
