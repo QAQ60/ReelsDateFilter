@@ -4,8 +4,8 @@ INSTALL_TARGET_PROCESSES = Instagram
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = ReelsDateFilter
-ReelsDateFilter_FILES = Tweak.xm rg_date_filter.c
+LIBRARY_NAME = ReelsDateFilter
+ReelsDateFilter_FILES = Tweak.mm rg_date_filter.c
 ReelsDateFilter_CFLAGS = -fobjc-arc
 
-include $(THEOS_MAKE_PATH)/tweak.mk
+include $(THEOS_MAKE_PATH)/library.mk

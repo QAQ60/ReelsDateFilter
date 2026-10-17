@@ -5,6 +5,8 @@
 
 #import "rg_date_filter.h"
 
+#import <objc/runtime.h>
+
 static NSString *const kRDFDaysKey = @"RDFDays";
 
 static char kRDFOrigIMPKey;
@@ -340,26 +342,51 @@ static void RDFAttachPill(UIViewController *controller)
     NSLog(@"[RDF] pill attached to %@", NSStringFromClass([controller class]));
 }
 
-#pragma mark - Hooks
+#pragma mark - Manual hooks (no CydiaSubstrate dependency)
 
-%hook IGListAdapter
+static IMP gRDFOriginalSetDataSource;
+static IMP gRDFOriginalViewDidAppear;
 
-- (void)setDataSource:(id)dataSource
+static void RDFSetDataSourceHook(id self, SEL _cmd, id dataSource)
 {
-    %orig;
+    if (gRDFOriginalSetDataSource) {
+        ((void (*)(id, SEL, id))gRDFOriginalSetDataSource)(self, _cmd, dataSource);
+    }
     gRDFLastAdapter = self;
     RDFInstallDataSource(dataSource);
 }
 
-%end
-
-%hook IGProfileViewController
-
-- (void)viewDidAppear:(BOOL)animated
+static void RDFViewDidAppearHook(id self, SEL _cmd, BOOL animated)
 {
-    %orig;
+    if (gRDFOriginalViewDidAppear) {
+        ((void (*)(id, SEL, BOOL))gRDFOriginalViewDidAppear)(self, _cmd, animated);
+    }
     gRDFLastProfile = self;
     RDFAttachPill(self);
 }
 
-%end
+__attribute__((constructor))
+static void RDFInitialize(void)
+{
+    Class adapterClass = objc_getClass("IGListAdapter");
+    if (adapterClass) {
+        SEL selector = @selector(setDataSource:);
+        Method method = class_getInstanceMethod(adapterClass, selector);
+        if (method) {
+            gRDFOriginalSetDataSource = method_getImplementation(method);
+            method_setImplementation(method, (IMP)RDFSetDataSourceHook);
+            NSLog(@"[RDF] installed setDataSource: hook");
+        }
+    }
+
+    Class profileClass = objc_getClass("IGProfileViewController");
+    if (profileClass) {
+        SEL selector = @selector(viewDidAppear:);
+        Method method = class_getInstanceMethod(profileClass, selector);
+        if (method) {
+            gRDFOriginalViewDidAppear = method_getImplementation(method);
+            method_setImplementation(method, (IMP)RDFViewDidAppearHook);
+            NSLog(@"[RDF] installed viewDidAppear: hook");
+        }
+    }
+}
