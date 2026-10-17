@@ -33,6 +33,7 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 
 ## 实现
 
+- 无 Logos、无 CydiaSubstrate 依赖，构造器里直接 `method_setImplementation`，方便注入非越狱 IPA
 - `IGListAdapter setDataSource:` 被 hook，拿到当前页面的数据源对象
 - 在数据源类上替换 `objectsForListAdapter:`，返回前按 `media.takenAtDate` 过滤
 - 只处理类名含 `Sundial` / `Reel` / `Clip` 的数据源或对象，避免影响首页和「作品」标签
@@ -71,7 +72,7 @@ make
 
 | 文件 | 说明 |
 | --- | --- |
-| `Tweak.xm` | hook、过滤、入口按钮、提示与输入弹窗 |
+| `Tweak.mm` | 手写 runtime hook、过滤、入口按钮、提示与输入弹窗 |
 | `rg_date_filter.c/.h` | 输入解析与时间判断，纯 C |
 | `ReelsDateFilter.plist` | 越狱加载过滤（仅 `com.burbn.instagram`） |
 | `Makefile` | Theos，arm64 + arm64e |
