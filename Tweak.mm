@@ -17,6 +17,7 @@ static UIViewController *RDFTopViewController(void);
 
 static __weak id gRDFLastAdapter;
 static NSMutableArray<NSString *> *gRDFRecentSources;
+static NSMutableDictionary<NSString *, NSString *> *gRDFStats;
 
 #pragma mark - Instagram surface (declared, not implemented here)
 
@@ -74,13 +75,40 @@ static NSDate *RDFTakenAtForObject(id object)
 // timestamp. Depth is capped to keep this cheap.
 static NSDate *RDFDateFromIvars(id object, NSInteger depth)
 {
-    if (!object || depth > 1) return nil;
+    if (!object || depth > 2) return nil;
 
     unsigned int count = 0;
     Ivar *ivars = class_copyIvarList([object class], &count);
     if (!ivars) return nil;
 
+    // First pass: containers such as _media / _model / _viewModel hold the date.
+    static NSArray<NSString *> *containers;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        containers = @[ @"media", @"model", @"item", @"viewmodel", @"griditem", @"feeditem", @"aweme" ];
+    });
+
     NSDate *found = nil;
+    for (unsigned int i = 0; i < count && !found; i++) {
+        const char *raw = ivar_getName(ivars[i]);
+        if (!raw) continue;
+        NSString *name = [[NSString stringWithUTF8String:raw] lowercaseString];
+
+        BOOL isContainer = NO;
+        for (NSString *hint in containers) {
+            if ([name containsString:hint]) { isContainer = YES; break; }
+        }
+        if (!isContainer) continue;
+
+        @try {
+            id value = object_getIvar(object, ivars[i]);
+            if (value && ![value isKindOfClass:[NSString class]]) {
+                found = RDFDateFromIvars(value, depth + 1);
+            }
+        } @catch (__unused NSException *exception) {}
+    }
+
+    // Second pass: timestamp-named fields on this object.
     for (unsigned int i = 0; i < count && !found; i++) {
         const char *raw = ivar_getName(ivars[i]);
         if (!raw) continue;
@@ -97,11 +125,10 @@ static NSDate *RDFDateFromIvars(id object, NSInteger depth)
                     if (stamp > 100000000000.0) stamp /= 1000.0;
                     found = [NSDate dateWithTimeIntervalSince1970:stamp];
                 }
-            } else if (value && depth < 1) {
-                found = RDFDateFromIvars(value, depth + 1);
             }
         } @catch (__unused NSException *exception) {}
     }
+
     free(ivars);
     return found;
 }
@@ -226,11 +253,22 @@ static RDFSurface RDFSurfaceForAdapter(id adapter, id dataSource)
     return (RDFSurface)rg_surface_resolve(names, count);
 }
 
+static RDFSurface RDFSurfaceForDataSourceClass(id dataSource)
+{
+    NSString *name = NSStringFromClass([dataSource class]);
+    if ([name containsString:@"Explore"] || [name containsString:@"Discovery"]) return RDFSurfaceSearch;
+    if ([name containsString:@"MainFeed"]) return RDFSurfaceHome;
+    if ([name containsString:@"Profile"]) return RDFSurfaceProfile;
+    if ([name containsString:@"Sundial"]) return RDFSurfaceReels;
+    return RDFSurfaceNone;
+}
+
 static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 {
     if (objects.count == 0) return objects;
 
     RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
+    if (surface == RDFSurfaceNone) surface = RDFSurfaceForDataSourceClass(dataSource);
     if (surface == RDFSurfaceNone) {
         static NSMutableSet *logged;
         static dispatch_once_t once;
@@ -258,6 +296,7 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     NSDate *now = [NSDate date];
     NSMutableArray *kept = [NSMutableArray arrayWithCapacity:objects.count];
 
+    NSUInteger dated = 0;
     for (id object in objects) {
         NSDate *takenAt = RDFTakenAtForObject(object);
         if (!takenAt) {
@@ -265,8 +304,17 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
             [kept addObject:object];
             continue;
         }
+        dated++;
         NSTimeInterval age = [now timeIntervalSinceDate:takenAt];
         if (rg_filter_should_keep(filter, age)) [kept addObject:object];
+    }
+
+    @synchronized ([NSNull null]) {
+        if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
+        gRDFStats[NSStringFromClass([dataSource class])] =
+            [NSString stringWithFormat:@"s=%ld n=%lu d=%lu k=%lu",
+             (long)surface, (unsigned long)objects.count,
+             (unsigned long)dated, (unsigned long)kept.count];
     }
 
     return kept;
@@ -653,7 +701,25 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 
 @interface RDFScopeViewController : UIViewController
 - (void)refreshValues;
-- (void)showDiagnostics:(UILongPressGestureRecognizer *)gesture;
+- (void)showDiagnostics:(UILongPressGestureRecognizer *)gesture
+{
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    @synchronized ([NSNull null]) {
+        NSArray *keys = [gRDFStats.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        for (NSString *key in keys) {
+            [lines addObject:[NSString stringWithFormat:@"%@  %@", key, gRDFStats[key]]];
+        }
+    }
+    NSString *text = lines.count ? [lines componentsJoinedByString:@"\n"] : @"还没有捕获到数据源";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"数据源（s=页面 n=条目 d=有日期 k=保留）"
+                                                                   message:text
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 @end
 
 @implementation RDFScopeViewController {
