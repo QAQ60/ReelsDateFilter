@@ -485,6 +485,12 @@ static NSString *RDFHumanDuration(double days)
     return shared;
 }
 
+- (void)settingsTapped:(UIBarButtonItem *)sender
+{
+    UIViewController *host = objc_getAssociatedObject(sender, kRDFHostKey.UTF8String);
+    [self presentFrom:host ?: RDFTopViewController()];
+}
+
 - (void)presentFrom:(UIViewController *)host
 {
     if (!host) return;
