@@ -176,10 +176,303 @@ static void RDFReloadLists(void)
 
 #pragma mark - Settings sheet
 
+
+#pragma mark - Input sheet with live conversion
+
+static NSString *RDFHumanDuration(double days)
+{
+    double magnitude = fabs(days);
+    if (magnitude < RG_FILTER_MIN_DAYS) return @"关闭";
+
+    long totalMinutes = lround(magnitude * 1440.0);
+    if (totalMinutes < 1) return @"不到 1 分钟";
+
+    long d = totalMinutes / 1440;
+    long h = (totalMinutes % 1440) / 60;
+    long m = totalMinutes % 60;
+
+    NSMutableString *text = [NSMutableString string];
+    if (d > 0) {
+        [text appendFormat:@"%ld 天", d];
+        if (h > 0) [text appendFormat:@" %ld 小时", h];
+    } else if (h > 0) {
+        [text appendFormat:@"%ld 小时", h];
+        if (m > 0) [text appendFormat:@" %ld 分钟", m];
+    } else {
+        [text appendFormat:@"%ld 分钟", m];
+    }
+    return text;
+}
+
+@interface RDFInputViewController : UIViewController
+@property (nonatomic) double initialDays;
+@property (nonatomic, copy) void (^onCommit)(double days);
+@end
+
+@implementation RDFInputViewController {
+    UIView *_dim;
+    UIView *_card;
+    UITextField *_field;
+    UIView *_convBox;
+    UILabel *_convValue;
+    UILabel *_convBadge;
+    UILabel *_errorLabel;
+    NSArray<UIButton *> *_chips;
+    CGFloat _keyboardInset;
+}
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.modalPresentationStyle = UIModalPresentationOverFullScreen;
+
+    _dim = [[UIView alloc] initWithFrame:self.view.bounds];
+    _dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    _dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_dim];
+
+    _card = [[UIView alloc] initWithFrame:CGRectZero];
+    _card.backgroundColor = [UIColor colorWithWhite:0.17 alpha:0.98];
+    _card.layer.cornerRadius = 16;
+    _card.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.view addSubview:_card];
+
+    UILabel *title = [self labelWithText:@"输入天数" size:16.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
+    title.frame = CGRectMake(0, 18, 306, 22);
+    title.textAlignment = NSTextAlignmentCenter;
+    [_card addSubview:title];
+
+    UILabel *subtitle = [self labelWithText:@"正数 = 最近 N 天，负数 = N 天以前，0 = 关闭" size:11.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    subtitle.frame = CGRectMake(10, 43, 286, 16);
+    subtitle.textAlignment = NSTextAlignmentCenter;
+    [_card addSubview:subtitle];
+
+    _field = [[UITextField alloc] initWithFrame:CGRectMake(16, 66, 274, 46)];
+    _field.backgroundColor = [UIColor colorWithWhite:0 alpha:0.32];
+    _field.layer.cornerRadius = 10;
+    _field.layer.borderWidth = 1;
+    _field.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.16].CGColor;
+    _field.textColor = UIColor.whiteColor;
+    _field.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
+    _field.textAlignment = NSTextAlignmentCenter;
+    _field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+    _field.placeholder = @"10 / 0.5 / -10";
+    _field.autocorrectionType = UITextAutocorrectionTypeNo;
+    [_field addTarget:self action:@selector(textChanged:) forControlEvents:UIControlEventEditingChanged];
+    [_card addSubview:_field];
+
+    _convBox = [[UIView alloc] initWithFrame:CGRectMake(16, 120, 274, 56)];
+    _convBox.backgroundColor = [UIColor colorWithRed:0.49 green:0.23 blue:0.93 alpha:0.20];
+    _convBox.layer.cornerRadius = 10;
+    _convBox.layer.borderWidth = 1;
+    _convBox.layer.borderColor = [UIColor colorWithRed:0.49 green:0.23 blue:0.93 alpha:0.45].CGColor;
+    [_card addSubview:_convBox];
+
+    UILabel *convTitle = [self labelWithText:@"约等于" size:10.5 weight:UIFontWeightRegular color:[UIColor colorWithRed:0.72 green:0.66 blue:0.90 alpha:1]];
+    convTitle.frame = CGRectMake(12, 9, 160, 14);
+    [_convBox addSubview:convTitle];
+
+    _convValue = [self labelWithText:@"" size:14.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
+    _convValue.frame = CGRectMake(12, 25, 170, 20);
+    [_convBox addSubview:_convValue];
+
+    _convBadge = [self labelWithText:@"" size:10.5 weight:UIFontWeightMedium color:[UIColor colorWithRed:0.86 green:0.82 blue:1 alpha:1]];
+    _convBadge.textAlignment = NSTextAlignmentCenter;
+    _convBadge.backgroundColor = [UIColor colorWithRed:0.49 green:0.23 blue:0.93 alpha:0.45];
+    _convBadge.layer.cornerRadius = 10;
+    _convBadge.clipsToBounds = YES;
+    _convBadge.frame = CGRectMake(206, 16, 56, 22);
+    [_convBox addSubview:_convBadge];
+
+    _errorLabel = [self labelWithText:@"" size:10.5 weight:UIFontWeightRegular color:[UIColor colorWithRed:1 green:0.55 blue:0.5 alpha:1]];
+    _errorLabel.frame = CGRectMake(16, 180, 274, 14);
+    [_card addSubview:_errorLabel];
+
+    NSArray *titles = @[@"0.5", @"1", @"7", @"10", @"30", @"-10"];
+    NSMutableArray *chips = [NSMutableArray array];
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        UIButton *chip = [UIButton buttonWithType:UIButtonTypeCustom];
+        [chip setTitle:titles[i] forState:UIControlStateNormal];
+        [chip setTitleColor:[UIColor colorWithWhite:0.88 alpha:1] forState:UIControlStateNormal];
+        chip.titleLabel.font = [UIFont systemFontOfSize:11.5];
+        chip.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+        chip.layer.cornerRadius = 13;
+        chip.layer.borderWidth = 1;
+        chip.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
+        [chip addTarget:self action:@selector(chipTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [_card addSubview:chip];
+        [chips addObject:chip];
+    }
+    _chips = chips;
+
+    NSArray *actions = @[@"清除", @"取消", @"保存"];
+    NSMutableArray *buttons = [NSMutableArray array];
+    for (NSUInteger i = 0; i < actions.count; i++) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        [button setTitle:actions[i] forState:UIControlStateNormal];
+        button.titleLabel.font = [UIFont systemFontOfSize:i == 2 ? 15.5 : 15 weight:i == 2 ? UIFontWeightSemibold : UIFontWeightRegular];
+        UIColor *color = i == 0 ? [UIColor colorWithRed:1 green:0.27 blue:0.23 alpha:1] : [UIColor colorWithRed:0.04 green:0.52 blue:1 alpha:1];
+        [button setTitleColor:color forState:UIControlStateNormal];
+        [button addTarget:self action:@selector(actionTapped:) forControlEvents:UIControlEventTouchUpInside];
+        button.tag = 100 + i;
+        [_card addSubview:button];
+        [buttons addObject:button];
+    }
+
+    UIView *separator = [[UIView alloc] initWithFrame:CGRectZero];
+    separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    separator.tag = 55;
+    [_card addSubview:separator];
+
+    _field.text = self.initialDays != 0 ? [NSString stringWithFormat:@"%g", self.initialDays] : @"";
+    [self refreshConversion];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardChanged:)
+                                                 name:UIKeyboardWillChangeFrameNotification object:nil];
+}
+
+- (UILabel *)labelWithText:(NSString *)text size:(CGFloat)size weight:(UIFontWeight)weight color:(UIColor *)color
+{
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+    label.text = text;
+    label.font = [UIFont systemFontOfSize:size weight:weight];
+    label.textColor = color;
+    return label;
+}
+
+- (void)viewDidLayoutSubviews
+{
+    [super viewDidLayoutSubviews];
+    CGFloat width = 306, height = 374;
+    CGFloat x = (CGRectGetWidth(self.view.bounds) - width) / 2;
+    CGFloat y = (CGRectGetHeight(self.view.bounds) - height) / 2;
+    if (_keyboardInset > 0) {
+        y = MIN(y, CGRectGetHeight(self.view.bounds) - _keyboardInset - height - 10);
+        y = MAX(24, y);
+    }
+    _card.frame = CGRectMake(x, y, width, height);
+
+    CGFloat chipWidth = 42, gap = 6;
+    CGFloat total = 6 * chipWidth + 5 * gap;
+    CGFloat startX = (width - total) / 2;
+    for (NSUInteger i = 0; i < _chips.count; i++) {
+        _chips[i].frame = CGRectMake(startX + i * (chipWidth + gap), 202, chipWidth, 26);
+    }
+
+    UIView *separator = [_card viewWithTag:55];
+    separator.frame = CGRectMake(0, 330, width, 1);
+
+    CGFloat buttonWidth = width / 3.0;
+    for (NSInteger i = 0; i < 3; i++) {
+        UIButton *button = (UIButton *)[_card viewWithTag:100 + i];
+        button.frame = CGRectMake(i * buttonWidth, 331, buttonWidth, 43);
+        if (i > 0) {
+            UIView *line = [_card viewWithTag:200 + i];
+            if (!line) {
+                line = [[UIView alloc] initWithFrame:CGRectZero];
+                line.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+                line.tag = 200 + i;
+                [_card addSubview:line];
+            }
+            line.frame = CGRectMake(i * buttonWidth, 331, 1, 43);
+        }
+    }
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+    [_field becomeFirstResponder];
+}
+
+- (void)keyboardChanged:(NSNotification *)note
+{
+    CGRect frame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGFloat screenHeight = CGRectGetHeight(self.view.bounds);
+    _keyboardInset = MAX(0, screenHeight - CGRectGetMinY(frame));
+    [UIView animateWithDuration:0.22 animations:^{
+        [self.view setNeedsLayout];
+        [self.view layoutIfNeeded];
+    }];
+}
+
+- (void)textChanged:(UITextField *)field
+{
+    _errorLabel.text = @"";
+    [self refreshConversion];
+}
+
+- (void)refreshConversion
+{
+    double value = 0;
+    RGDateFilter filter;
+    RGParseResult result = rg_parse_days(_field.text.UTF8String, &value, &filter);
+
+    if (result == RGParseInvalid) {
+        _convValue.text = @"请输入数字";
+        _convBadge.text = @"无效";
+        return;
+    }
+    if (result == RGParseTooSmall) {
+        _convValue.text = @"不到 1 分钟";
+        _convBadge.text = @"太短";
+        return;
+    }
+    if (result == RGParseTooLarge) {
+        _convValue.text = @"超过 1 年";
+        _convBadge.text = @"太长";
+        return;
+    }
+    if (result == RGParseEmpty || result == RGParseZero) {
+        _convValue.text = @"关闭过滤";
+        _convBadge.text = @"关闭";
+        return;
+    }
+    _convValue.text = RDFHumanDuration(value);
+    _convBadge.text = value > 0 ? @"最近" : @"更早";
+}
+
+- (void)chipTapped:(UIButton *)chip
+{
+    _field.text = chip.currentTitle;
+    [self textChanged:_field];
+}
+
+- (void)actionTapped:(UIButton *)sender
+{
+    NSInteger index = sender.tag - 100;
+    if (index == 1) { [self dismissViewControllerAnimated:YES completion:nil]; return; }
+    if (index == 0) {
+        if (self.onCommit) self.onCommit(0);
+        [self dismissViewControllerAnimated:YES completion:nil];
+        return;
+    }
+
+    double value = 0;
+    RGDateFilter filter;
+    RGParseResult result = rg_parse_days(_field.text.UTF8String, &value, &filter);
+    if (result == RGParseInvalid) { _errorLabel.text = @"只能输入数字、小数点和负号"; return; }
+    if (result == RGParseTooSmall) { _errorLabel.text = @"最短 1 分钟（0.0007 天）"; return; }
+    if (result == RGParseTooLarge) { _errorLabel.text = @"最长 1 年（365 天）"; return; }
+
+    double commit = (result == RGParseEmpty || result == RGParseZero) ? 0 : value;
+    if (self.onCommit) self.onCommit(commit);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+@end
+
 @interface RDFConfigurator : NSObject
 + (instancetype)shared;
 - (void)presentFrom:(UIViewController *)host;
 - (void)settingsTapped:(UIBarButtonItem *)sender;
+- (void)commitDays:(double)days;
 @end
 
 @implementation RDFConfigurator
@@ -202,7 +495,8 @@ static void RDFReloadLists(void)
         @"比如 0.5 就是判断 12 小时内\n\n"
         @"支持输入负数 比如 -10 只刷 10 天以前发布的视频\n"
         @"（注意：输入过大可能无法加载出视频或功能无效）\n"
-        @"最长 1 年，最短 1 分钟。";
+        @"最长 1 年，最短 1 分钟。\n"
+        @"单位是天：1 小时 = 0.0417，30 分钟 = 0.021。";
 
     UIAlertController *alert =
         [UIAlertController alertControllerWithTitle:@"提示"
@@ -224,56 +518,20 @@ static void RDFReloadLists(void)
 
 - (void)presentInputFrom:(UIViewController *)host
 {
-    double current = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
-
-    UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"输入天数"
-                                            message:@"正数 = 最近 N 天，负数 = N 天以前，0 = 关闭"
-                                     preferredStyle:UIAlertControllerStyleAlert];
-
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
-        field.placeholder = @"10 / 0.5 / -10";
-        field.textAlignment = NSTextAlignmentCenter;
-        if (fabs(current) >= RG_FILTER_MIN_DAYS) field.text = [NSString stringWithFormat:@"%g", current];
-    }];
-
+    RDFInputViewController *controller = [RDFInputViewController new];
+    controller.initialDays = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
     __weak typeof(self) weakSelf = self;
-    __weak UIViewController *weakHost = host;
+    controller.onCommit = ^(double days) {
+        [weakSelf commitDays:days];
+    };
+    [host presentViewController:controller animated:YES completion:nil];
+}
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"清除"
-                                              style:UIAlertActionStyleDestructive
-                                            handler:^(__unused UIAlertAction *action) {
-        [weakSelf applyDays:0 host:weakHost];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"保存"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        NSString *text = alert.textFields.firstObject.text ?: @"";
-        double value = 0;
-        RGDateFilter filter;
-        RGParseResult result = rg_parse_days(text.UTF8String, &value, &filter);
-
-        if (result == RGParseInvalid) {
-            [weakSelf presentError:@"只能输入数字、小数点和负号" host:weakHost];
-            return;
-        }
-        if (result == RGParseTooLarge) {
-            [weakSelf presentError:@"最长 1 年（365 天）" host:weakHost];
-            return;
-        }
-        if (result == RGParseTooSmall) {
-            [weakSelf presentError:@"最短 1 分钟（0.0007 天）" host:weakHost];
-            return;
-        }
-        [weakSelf applyDays:(result == RGParseEmpty || result == RGParseZero) ? 0 : value
-                       host:weakHost];
-    }]];
-
-    [host presentViewController:alert animated:YES completion:nil];
+- (void)commitDays:(double)days
+{
+    [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kRDFDaysKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    RDFReloadLists();
 }
 
 - (void)presentError:(NSString *)message host:(UIViewController *)host
@@ -283,20 +541,6 @@ static void RDFReloadLists(void)
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [host presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)applyDays:(double)days host:(UIViewController *)host
-{
-    [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kRDFDaysKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-
-    RDFReloadLists();
-}
-
-- (void)settingsTapped:(UIBarButtonItem *)sender
-{
-    UIViewController *host = objc_getAssociatedObject(sender, kRDFHostKey.UTF8String);
-    [self presentFrom:host ?: RDFTopViewController()];
 }
 
 @end
