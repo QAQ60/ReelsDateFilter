@@ -30,6 +30,8 @@ static __weak id gRDFLastAdapter;
 
 // Profile grid objects expose the media through several wrappers depending on
 // the Instagram build; try the known key paths in order.
+static NSDate *RDFDateFromIvars(id object, NSInteger depth);
+
 static NSDate *RDFTakenAtForObject(id object)
 {
     static NSArray<NSString *> *paths;
@@ -63,7 +65,44 @@ static NSDate *RDFTakenAtForObject(id object)
             // KVC throws for unknown keys on some Swift-backed wrappers.
         }
     }
-    return nil;
+    return RDFDateFromIvars(object, 0);
+}
+
+// Explore items (IGDiscoveryGridItem) do not expose takenAtDate on the same key
+// paths as profile media, so fall back to scanning ivars whose names suggest a
+// timestamp. Depth is capped to keep this cheap.
+static NSDate *RDFDateFromIvars(id object, NSInteger depth)
+{
+    if (!object || depth > 1) return nil;
+
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList([object class], &count);
+    if (!ivars) return nil;
+
+    NSDate *found = nil;
+    for (unsigned int i = 0; i < count && !found; i++) {
+        const char *raw = ivar_getName(ivars[i]);
+        if (!raw) continue;
+        NSString *name = [[NSString stringWithUTF8String:raw] lowercaseString];
+        if (!([name containsString:@"time"] || [name containsString:@"date"] || [name containsString:@"taken"])) continue;
+
+        @try {
+            id value = object_getIvar(object, ivars[i]);
+            if ([value isKindOfClass:[NSDate class]]) {
+                found = value;
+            } else if ([value isKindOfClass:[NSNumber class]]) {
+                double stamp = [value doubleValue];
+                if (stamp > 1000000000.0) {
+                    if (stamp > 100000000000.0) stamp /= 1000.0;
+                    found = [NSDate dateWithTimeIntervalSince1970:stamp];
+                }
+            } else if (value && depth < 1) {
+                found = RDFDateFromIvars(value, depth + 1);
+            }
+        } @catch (__unused NSException *exception) {}
+    }
+    free(ivars);
+    return found;
 }
 
 static BOOL RDFLooksLikeProfileReels(id dataSource, NSArray *objects)
@@ -96,6 +135,45 @@ typedef NS_OPTIONS(NSInteger, RDFSurface) {
     RDFSurfaceSearch  = 1 << 2,
     RDFSurfaceProfile = 1 << 3,
 };
+
+static NSString *RDFSurfaceName(RDFSurface surface)
+{
+    switch (surface) {
+        case RDFSurfaceHome: return @"首页";
+        case RDFSurfaceReels: return @"Reels";
+        case RDFSurfaceSearch: return @"搜索 / 发现";
+        case RDFSurfaceProfile: return @"个人主页";
+        default: return @"未识别";
+    }
+}
+
+static NSString *RDFDaysKeyForSurface(RDFSurface surface)
+{
+    switch (surface) {
+        case RDFSurfaceHome: return @"RDFDaysHome";
+        case RDFSurfaceReels: return @"RDFDaysReels";
+        case RDFSurfaceSearch: return @"RDFDaysSearch";
+        case RDFSurfaceProfile: return @"RDFDaysProfile";
+        default: return kRDFDaysKey;
+    }
+}
+
+static double RDFDaysForSurface(RDFSurface surface)
+{
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *key = RDFDaysKeyForSurface(surface);
+    NSNumber *stored = [defaults objectForKey:key];
+    if (stored) return stored.doubleValue;
+    // Legacy single value: use it until this surface gets its own.
+    return [defaults doubleForKey:kRDFDaysKey];
+}
+
+static void RDFSetDaysForSurface(RDFSurface surface, double days)
+{
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setDouble:days forKey:RDFDaysKeyForSurface(surface)];
+    [defaults synchronize];
+}
 
 static NSString *const kRDFScopeKey = @"RDFScope";
 
@@ -149,8 +227,7 @@ static RDFSurface RDFSurfaceForAdapter(id adapter, id dataSource)
 
 static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 {
-    double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
-    if (fabs(days) < RG_FILTER_MIN_DAYS || objects.count == 0) return objects;
+    if (objects.count == 0) return objects;
 
     RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
     if (surface == RDFSurfaceNone) {
@@ -167,6 +244,9 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
         return objects;
     }
     if ((RDFScopeMask() & surface) == 0) return objects;
+
+    double days = RDFDaysForSurface(surface);
+    if (fabs(days) < RG_FILTER_MIN_DAYS) return objects;
 
     // Profile and reels are gated by model names to avoid touching unrelated
     // lists. Explore items are IGDiscoveryGridItem, so that gate has to be
@@ -209,7 +289,7 @@ static NSArray *RDFObjectsForListAdapter(id self, SEL _cmd, id adapter)
               NSStringFromClass([self class]),
               (unsigned long)filtered.count,
               (unsigned long)objects.count,
-              [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey]);
+              RDFDaysForSurface(RDFSurfaceForAdapter(adapter, self)));
     }
     return filtered;
 }
@@ -288,6 +368,7 @@ static NSString *RDFHumanDuration(double days)
 
 @interface RDFInputViewController : UIViewController
 @property (nonatomic) double initialDays;
+@property (nonatomic) RDFSurface surface;
 @property (nonatomic, copy) void (^onCommit)(double days);
 @end
 
@@ -320,7 +401,8 @@ static NSString *RDFHumanDuration(double days)
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     [self.view addSubview:_card];
 
-    UILabel *title = [self labelWithText:@"输入天数" size:16.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
+    NSString *titleText = [NSString stringWithFormat:@"%@ · 过滤时长", RDFSurfaceName(self.surface)];
+    UILabel *title = [self labelWithText:titleText size:16 weight:UIFontWeightSemibold color:UIColor.whiteColor];
     title.frame = CGRectMake(0, 18, 306, 22);
     title.textAlignment = NSTextAlignmentCenter;
     [_card addSubview:title];
@@ -553,22 +635,22 @@ static NSString *RDFHumanDuration(double days)
 
 #pragma mark - Scope sheet
 
-static NSString *RDFDaysSummary(void)
+static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 {
-    double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
+    double days = RDFDaysForSurface(surface);
     if (fabs(days) < RG_FILTER_MIN_DAYS) return @"未设置";
     NSString *human = RDFHumanDuration(days);
     return days > 0 ? [human stringByAppendingString:@"内"] : [human stringByAppendingString:@"以前"];
 }
 
 @interface RDFScopeViewController : UIViewController
+- (void)refreshValues;
 @end
 
 @implementation RDFScopeViewController {
     UIView *_dim;
     UIView *_card;
-    UILabel *_daysValue;
-    NSMutableArray<UISwitch *> *_switches;
+    NSMutableArray<UILabel *> *_valueLabels;
 }
 
 - (void)viewDidLoad
@@ -593,18 +675,29 @@ static NSString *RDFDaysSummary(void)
     title.tag = 1;
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"选择在哪些页面生效" size:11.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
 
-    NSArray *names = @[@"首页", @"Reels", @"搜索 / 发现", @"个人主页"];
+    _valueLabels = [NSMutableArray array];
     NSInteger mask = RDFScopeMask();
-    _switches = [NSMutableArray array];
-    for (NSUInteger i = 0; i < names.count; i++) {
-        UILabel *label = [self label:names[i] size:14 weight:UIFontWeightRegular color:UIColor.whiteColor];
-        label.tag = 10 + i;
-        [_card addSubview:label];
+
+    for (NSUInteger i = 0; i < 4; i++) {
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.tag = 40 + i;
+        [row addTarget:self action:@selector(editSurface:) forControlEvents:UIControlEventTouchUpInside];
+        [_card addSubview:row];
+
+        UILabel *name = [self label:RDFSurfaceName((RDFSurface)(1 << i)) size:14 weight:UIFontWeightRegular color:UIColor.whiteColor];
+        name.tag = 50 + i;
+        [_card addSubview:name];
+
+        UILabel *value = [self label:RDFDaysSummaryForSurface((RDFSurface)(1 << i)) size:12.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+        value.textAlignment = NSTextAlignmentRight;
+        value.tag = 60 + i;
+        [_card addSubview:value];
+        [_valueLabels addObject:value];
 
         UISwitch *toggle = [[UISwitch alloc] init];
         toggle.onTintColor = [UIColor colorWithRed:0.49 green:0.23 blue:0.93 alpha:1];
@@ -612,7 +705,6 @@ static NSString *RDFDaysSummary(void)
         toggle.on = (mask & (1 << i)) != 0;
         [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
         [_card addSubview:toggle];
-        [_switches addObject:toggle];
     }
 
     UIView *separator = [[UIView alloc] initWithFrame:CGRectZero];
@@ -620,27 +712,7 @@ static NSString *RDFDaysSummary(void)
     separator.tag = 3;
     [_card addSubview:separator];
 
-    UIButton *daysRow = [UIButton buttonWithType:UIButtonTypeCustom];
-    daysRow.tag = 30;
-    [daysRow addTarget:self action:@selector(editDays) forControlEvents:UIControlEventTouchUpInside];
-    [_card addSubview:daysRow];
-
-    UILabel *daysTitle = [self label:@"过滤时长" size:14 weight:UIFontWeightRegular color:UIColor.whiteColor];
-    daysTitle.tag = 31;
-    [daysRow addSubview:daysTitle];
-
-    _daysValue = [self label:RDFDaysSummary() size:13.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
-    _daysValue.textAlignment = NSTextAlignmentRight;
-    _daysValue.tag = 32;
-    [daysRow addSubview:_daysValue];
-
-    UILabel *chevron = [self label:@"›" size:18 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.45 alpha:1]];
-    chevron.textAlignment = NSTextAlignmentRight;
-    chevron.tag = 33;
-    [daysRow addSubview:chevron];
-
-    UILabel *note = [self label:@"只在你打开的位置过滤。单位是天：1 小时 = 0.0417，30 分钟 = 0.021。"
-                            size:10.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.55 alpha:1]];
+    UILabel *note = [self label:@"点每一行单独设置时长。单位是天：1 小时 = 0.0417，30 分钟 = 0.021。" size:10.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.55 alpha:1]];
     note.numberOfLines = 2;
     note.tag = 4;
     [_card addSubview:note];
@@ -671,18 +743,20 @@ static NSString *RDFDaysSummary(void)
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    [self refreshDays];
+    [self refreshValues];
 }
 
-- (void)refreshDays
+- (void)refreshValues
 {
-    _daysValue.text = RDFDaysSummary();
+    for (NSUInteger i = 0; i < _valueLabels.count; i++) {
+        _valueLabels[i].text = RDFDaysSummaryForSurface((RDFSurface)(1 << i));
+    }
 }
 
 - (void)viewDidLayoutSubviews
 {
     [super viewDidLayoutSubviews];
-    CGFloat width = 306, height = 432;
+    CGFloat width = 306, height = 404;
     CGFloat x = (CGRectGetWidth(self.view.bounds) - width) / 2;
     CGFloat y = (CGRectGetHeight(self.view.bounds) - height) / 2;
     _card.frame = CGRectMake(x, y, width, height);
@@ -691,23 +765,17 @@ static NSString *RDFDaysSummary(void)
     [_card viewWithTag:2].frame = CGRectMake(0, 42, width, 16);
 
     for (NSUInteger i = 0; i < 4; i++) {
-        CGFloat top = 68 + i * 46;
-        [_card viewWithTag:10 + i].frame = CGRectMake(18, top + 12, 180, 20);
-        UISwitch *toggle = (UISwitch *)[_card viewWithTag:20 + i];
-        toggle.frame = CGRectMake(width - 18 - 51, top + 8, 51, 31);
+        CGFloat top = 64 + i * 50;
+        [_card viewWithTag:40 + i].frame = CGRectMake(0, top, width, 50);
+        [_card viewWithTag:50 + i].frame = CGRectMake(18, top + 15, 110, 20);
+        [_card viewWithTag:60 + i].frame = CGRectMake(width - 18 - 51 - 8 - 96, top + 16, 96, 18);
+        [(UISwitch *)[_card viewWithTag:20 + i] setFrame:CGRectMake(width - 18 - 51, top + 10, 51, 31)];
     }
 
-    [_card viewWithTag:3].frame = CGRectMake(0, 258, width, 1);
-    UIButton *daysRow = (UIButton *)[_card viewWithTag:30];
-    daysRow.frame = CGRectMake(0, 258, width, 46);
-    [daysRow viewWithTag:31].frame = CGRectMake(18, 13, 140, 20);
-    [daysRow viewWithTag:32].frame = CGRectMake(width - 100, 15, 76, 18);
-    [daysRow viewWithTag:33].frame = CGRectMake(width - 26, 10, 18, 26);
-
-    [_card viewWithTag:4].frame = CGRectMake(18, 310, width - 36, 32);
-
-    [_card viewWithTag:5].frame = CGRectMake(0, 384, width, 1);
-    [_card viewWithTag:6].frame = CGRectMake(0, 385, width, 47);
+    [_card viewWithTag:3].frame = CGRectMake(0, 264, width, 1);
+    [_card viewWithTag:4].frame = CGRectMake(18, 274, width - 36, 32);
+    [_card viewWithTag:5].frame = CGRectMake(0, 352, width, 1);
+    [_card viewWithTag:6].frame = CGRectMake(0, 353, width, 50);
 }
 
 - (void)toggleChanged:(UISwitch *)toggle
@@ -720,15 +788,17 @@ static NSString *RDFDaysSummary(void)
     RDFReloadLists();
 }
 
-- (void)editDays
+- (void)editSurface:(UIButton *)sender
 {
+    RDFSurface surface = (RDFSurface)(1 << (sender.tag - 40));
+
     RDFInputViewController *controller = [RDFInputViewController new];
-    controller.initialDays = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
+    controller.surface = surface;
+    controller.initialDays = RDFDaysForSurface(surface);
     __weak typeof(self) weakSelf = self;
     controller.onCommit = ^(double days) {
-        [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kRDFDaysKey];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        [weakSelf refreshDays];
+        RDFSetDaysForSurface(surface, days);
+        [weakSelf refreshValues];
         RDFReloadLists();
     };
     [self presentViewController:controller animated:YES completion:nil];
@@ -800,7 +870,8 @@ static NSString *RDFDaysSummary(void)
 - (void)presentInputFrom:(UIViewController *)host
 {
     RDFInputViewController *controller = [RDFInputViewController new];
-    controller.initialDays = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
+    controller.surface = RDFSurfaceProfile;
+    controller.initialDays = RDFDaysForSurface(RDFSurfaceProfile);
     __weak typeof(self) weakSelf = self;
     controller.onCommit = ^(double days) {
         [weakSelf commitDays:days];
