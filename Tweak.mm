@@ -16,6 +16,7 @@ static NSString *const kRDFHostKey = @"rdf.host";
 static UIViewController *RDFTopViewController(void);
 
 static __weak id gRDFLastAdapter;
+static NSMutableArray<NSString *> *gRDFRecentSources;
 
 #pragma mark - Instagram surface (declared, not implemented here)
 
@@ -311,7 +312,14 @@ static void RDFInstallDataSource(id dataSource)
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     class_replaceMethod(cls, selector, (IMP)RDFObjectsForListAdapter, method_getTypeEncoding(method));
 
-    NSLog(@"[RDF] hooked %@", NSStringFromClass(cls));
+    @synchronized ([NSNull null]) {
+        if (!gRDFRecentSources) gRDFRecentSources = [NSMutableArray array];
+        NSString *name = NSStringFromClass(cls);
+        [gRDFRecentSources removeObject:name];
+        [gRDFRecentSources insertObject:name atIndex:0];
+        if (gRDFRecentSources.count > 12) [gRDFRecentSources removeLastObject];
+    }
+    NSLog(@"[RDF] hooked data source %@", NSStringFromClass(cls));
 }
 
 static void RDFReloadLists(void)
@@ -645,6 +653,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 
 @interface RDFScopeViewController : UIViewController
 - (void)refreshValues;
+- (void)showDiagnostics:(UILongPressGestureRecognizer *)gesture;
 @end
 
 @implementation RDFScopeViewController {
@@ -673,6 +682,8 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     UILabel *title = [self label:@"时间过滤" size:16.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
     title.textAlignment = NSTextAlignmentCenter;
     title.tag = 1;
+    title.userInteractionEnabled = YES;
+    [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
     UILabel *subtitle = [self label:@"每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
@@ -807,6 +818,22 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 - (void)done
 {
     [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)showDiagnostics:(UILongPressGestureRecognizer *)gesture
+{
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+
+    NSArray *sources;
+    @synchronized ([NSNull null]) {
+        sources = [gRDFRecentSources copy] ?: @[];
+    }
+    NSString *text = sources.count ? [sources componentsJoinedByString:@"\n"] : @"还没有捕获到数据源";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已挂上的数据源"
+                                                                   message:text
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
@@ -1004,6 +1031,35 @@ static void RDFSetDataSourceHook(id self, SEL _cmd, id dataSource)
     RDFInstallDataSource(dataSource);
 }
 
+// Some lists (Explore among them) hand the data source to the adapter's
+// initializer instead of assigning it later, so setDataSource: alone misses them.
+static IMP gRDFOriginalInitDataSource;
+static IMP gRDFOriginalInitLayoutDataSource;
+
+static id RDFInitWithUpdaterDataSource(id self, SEL _cmd, id updater, id dataSource)
+{
+    id result = nil;
+    if (gRDFOriginalInitDataSource) {
+        result = ((id (*)(id, SEL, id, id))gRDFOriginalInitDataSource)(self, _cmd, updater, dataSource);
+    }
+    gRDFLastAdapter = result ?: self;
+    RDFInstallDataSource(dataSource);
+    NSLog(@"[RDF] adapter init ds=%@", NSStringFromClass([dataSource class]));
+    return result;
+}
+
+static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id updater, id dataSource)
+{
+    id result = nil;
+    if (gRDFOriginalInitLayoutDataSource) {
+        result = ((id (*)(id, SEL, id, id, id))gRDFOriginalInitLayoutDataSource)(self, _cmd, layout, updater, dataSource);
+    }
+    gRDFLastAdapter = result ?: self;
+    RDFInstallDataSource(dataSource);
+    NSLog(@"[RDF] adapter init(layout) ds=%@", NSStringFromClass([dataSource class]));
+    return result;
+}
+
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
@@ -1015,6 +1071,24 @@ static void RDFInitialize(void)
             gRDFOriginalSetDataSource = method_getImplementation(method);
             method_setImplementation(method, (IMP)RDFSetDataSourceHook);
             NSLog(@"[RDF] installed setDataSource: hook");
+        }
+    }
+
+    if (adapterClass) {
+        SEL initSelector = NSSelectorFromString(@"initWithUpdater:dataSource:");
+        Method initMethod = class_getInstanceMethod(adapterClass, initSelector);
+        if (initMethod) {
+            gRDFOriginalInitDataSource = method_getImplementation(initMethod);
+            method_setImplementation(initMethod, (IMP)RDFInitWithUpdaterDataSource);
+            NSLog(@"[RDF] installed adapter dataSource init hook");
+        }
+
+        SEL layoutSelector = NSSelectorFromString(@"initWithCollectionViewLayout:updater:dataSource:");
+        Method layoutMethod = class_getInstanceMethod(adapterClass, layoutSelector);
+        if (layoutMethod) {
+            gRDFOriginalInitLayoutDataSource = method_getImplementation(layoutMethod);
+            method_setImplementation(layoutMethod, (IMP)RDFInitWithLayoutUpdaterDataSource);
+            NSLog(@"[RDF] installed adapter layout init hook");
         }
     }
 
