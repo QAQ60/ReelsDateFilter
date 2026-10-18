@@ -64,6 +64,19 @@ int rg_filter_should_keep(RGDateFilter filter, double age_seconds);
  * 否则会无限请求下一页。返回 1 = 应停止自动翻页。 */
 int rg_should_stop_pagination(RGDateFilter filter, size_t page_count, size_t kept_count);
 
+
+/* 页面归属（Instagram）：用于把过滤限定在指定界面 */
+typedef enum {
+    RGFloatSurfaceNone    = 0,
+    RGFloatSurfaceHome    = 1 << 0,
+    RGFloatSurfaceReels   = 1 << 1,
+    RGFloatSurfaceSearch  = 1 << 2,
+    RGFloatSurfaceProfile = 1 << 3
+} RGFloatSurface;
+
+RGFloatSurface rg_surface_for_class_name(const char *name);
+RGFloatSurface rg_surface_resolve(const char *const *names, size_t count);
+
 #ifdef __cplusplus
 }
 #endif

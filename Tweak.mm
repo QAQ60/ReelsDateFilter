@@ -131,20 +131,19 @@ static RDFSurface RDFSurfaceForAdapter(id adapter, id dataSource)
             } @catch (__unused NSException *exception) {}
         }
     }
-    if (![view isKindOfClass:[UIView class]]) return 0;
+    if (![view isKindOfClass:[UIView class]]) return RDFSurfaceNone;
 
+    const char *names[32];
+    size_t count = 0;
     UIResponder *responder = view;
-    while (responder) {
+    while (responder && count < 32) {
         if ([responder isKindOfClass:[UIViewController class]]) {
-            NSString *name = NSStringFromClass([responder class]);
-            if ([name containsString:@"IGProfile"]) return RDFSurfaceProfile;
-            if ([name containsString:@"SundialFeed"] || [name containsString:@"Reels"]) return RDFSurfaceReels;
-            if ([name containsString:@"Explore"] || [name containsString:@"Search"] || [name containsString:@"Discovery"]) return RDFSurfaceSearch;
-            if ([name containsString:@"MainFeed"] || [name containsString:@"Feed"]) return RDFSurfaceHome;
+            names[count++] = class_getName([responder class]);
         }
         responder = [responder nextResponder];
     }
-    return 0;
+    if (count == 0) return RDFSurfaceNone;
+    return (RDFSurface)rg_surface_resolve(names, count);
 }
 
 static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
@@ -153,7 +152,7 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     if (fabs(days) < RG_FILTER_MIN_DAYS || objects.count == 0) return objects;
 
     RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
-    if (surface == 0) {
+    if (surface == RDFSurfaceNone) {
         static NSMutableSet *logged;
         static dispatch_once_t once;
         dispatch_once(&once, ^{ logged = [NSMutableSet set]; });

@@ -112,3 +112,43 @@ int rg_should_stop_pagination(RGDateFilter filter, size_t page_count, size_t kep
     if (page_count == 0) return 1;      /* 没有更多数据 */
     return kept_count == 0;             /* 整页都被过滤，继续翻页没有意义 */
 }
+
+static int rg_name_contains(const char *name, const char *needle)
+{
+    return name && needle && strstr(name, needle) != NULL;
+}
+
+RGFloatSurface rg_surface_for_class_name(const char *name)
+{
+    if (!name) return RGFloatSurfaceNone;
+
+    /* Profile first: repost and tab controllers also carry "Feed" in their names. */
+    if (rg_name_contains(name, "IGProfile")) return RGFloatSurfaceProfile;
+    if (rg_name_contains(name, "SundialFeed") ||
+        rg_name_contains(name, "IGReels") ||
+        rg_name_contains(name, "ReelsViewer")) return RGFloatSurfaceReels;
+    if (rg_name_contains(name, "Explore") ||
+        rg_name_contains(name, "Search") ||
+        rg_name_contains(name, "Discovery")) return RGFloatSurfaceSearch;
+    if (rg_name_contains(name, "MainFeed") ||
+        rg_name_contains(name, "IGFeedViewController")) return RGFloatSurfaceHome;
+    return RGFloatSurfaceNone;
+}
+
+RGFloatSurface rg_surface_resolve(const char *const *names, size_t count)
+{
+    if (!names) return RGFloatSurfaceNone;
+
+    /* Profile wins over any other match in the chain: a profile tab may host a
+       feed controller, and that must not be treated as the home feed. */
+    for (size_t i = 0; i < count; i++) {
+        if (rg_surface_for_class_name(names[i]) == RGFloatSurfaceProfile) {
+            return RGFloatSurfaceProfile;
+        }
+    }
+    for (size_t i = 0; i < count; i++) {
+        RGFloatSurface surface = rg_surface_for_class_name(names[i]);
+        if (surface != RGFloatSurfaceNone) return surface;
+    }
+    return RGFloatSurfaceNone;
+}
