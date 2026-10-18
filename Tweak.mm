@@ -153,8 +153,25 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     if (fabs(days) < RG_FILTER_MIN_DAYS || objects.count == 0) return objects;
 
     RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
-    if (surface == 0 || (RDFScopeMask() & surface) == 0) return objects;
-    if (!RDFLooksLikeProfileReels(dataSource, objects)) return objects;
+    if (surface == 0) {
+        static NSMutableSet *logged;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ logged = [NSMutableSet set]; });
+        NSString *name = NSStringFromClass([dataSource class]);
+        @synchronized (logged) {
+            if (![logged containsObject:name]) {
+                [logged addObject:name];
+                NSLog(@"[RDF] unknown surface: %@", name);
+            }
+        }
+        return objects;
+    }
+    if ((RDFScopeMask() & surface) == 0) return objects;
+
+    // Profile and reels are gated by model names to avoid touching unrelated
+    // lists. Explore items are IGDiscoveryGridItem, so that gate has to be
+    // skipped there; undated items are still kept by the filter itself.
+    if (surface != RDFSurfaceSearch && !RDFLooksLikeProfileReels(dataSource, objects)) return objects;
 
     RGDateFilter filter = rg_filter_make(days);
     NSDate *now = [NSDate date];
@@ -187,7 +204,8 @@ static NSArray *RDFObjectsForListAdapter(id self, SEL _cmd, id adapter)
 
     NSArray *filtered = RDFFilteredObjects(self, objects, adapter);
     if (filtered.count != objects.count) {
-        NSLog(@"[RDF] %@ -> %lu/%lu (days=%g)",
+        NSLog(@"[RDF] surface=%ld %@ -> %lu/%lu (days=%g)",
+              (long)RDFSurfaceForAdapter(adapter, self),
               NSStringFromClass([self class]),
               (unsigned long)filtered.count,
               (unsigned long)objects.count,
