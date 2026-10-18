@@ -86,10 +86,74 @@ static BOOL RDFLooksLikeProfileReels(id dataSource, NSArray *objects)
     return NO;
 }
 
-static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects)
+
+#pragma mark - Scope
+
+typedef NS_OPTIONS(NSInteger, RDFSurface) {
+    RDFSurfaceHome    = 1 << 0,
+    RDFSurfaceReels   = 1 << 1,
+    RDFSurfaceSearch  = 1 << 2,
+    RDFSurfaceProfile = 1 << 3,
+};
+
+static NSString *const kRDFScopeKey = @"RDFScope";
+
+static NSInteger RDFScopeMask(void)
+{
+    NSNumber *stored = [[NSUserDefaults standardUserDefaults] objectForKey:kRDFScopeKey];
+    if (!stored) return RDFSurfaceHome | RDFSurfaceReels | RDFSurfaceSearch;
+    return stored.integerValue;
+}
+
+static void RDFSetScopeMask(NSInteger mask)
+{
+    [[NSUserDefaults standardUserDefaults] setInteger:mask forKey:kRDFScopeKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+// The surface is derived from the controller that owns the list, not from the
+// data source class: Explore and profile reels share model types, and filtering
+// by class name was what pulled Explore into the filter.
+static RDFSurface RDFSurfaceForAdapter(id adapter, id dataSource)
+{
+    UIView *view = nil;
+    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
+        @try {
+            id candidate = [adapter valueForKey:key];
+            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
+        } @catch (__unused NSException *exception) {}
+    }
+    if (!view) {
+        for (NSString *key in @[@"collectionView", @"_collectionView"]) {
+            @try {
+                id candidate = [dataSource valueForKey:key];
+                if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
+            } @catch (__unused NSException *exception) {}
+        }
+    }
+    if (![view isKindOfClass:[UIView class]]) return 0;
+
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            NSString *name = NSStringFromClass([responder class]);
+            if ([name containsString:@"IGProfile"]) return RDFSurfaceProfile;
+            if ([name containsString:@"SundialFeed"] || [name containsString:@"Reels"]) return RDFSurfaceReels;
+            if ([name containsString:@"Explore"] || [name containsString:@"Search"] || [name containsString:@"Discovery"]) return RDFSurfaceSearch;
+            if ([name containsString:@"MainFeed"] || [name containsString:@"Feed"]) return RDFSurfaceHome;
+        }
+        responder = [responder nextResponder];
+    }
+    return 0;
+}
+
+static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 {
     double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
     if (fabs(days) < RG_FILTER_MIN_DAYS || objects.count == 0) return objects;
+
+    RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
+    if (surface == 0 || (RDFScopeMask() & surface) == 0) return objects;
     if (!RDFLooksLikeProfileReels(dataSource, objects)) return objects;
 
     RGDateFilter filter = rg_filter_make(days);
@@ -121,7 +185,7 @@ static NSArray *RDFObjectsForListAdapter(id self, SEL _cmd, id adapter)
     NSArray *objects = ((NSArray *(*)(id, SEL, id))original)(self, _cmd, adapter);
     if (![objects isKindOfClass:[NSArray class]] || objects.count == 0) return objects;
 
-    NSArray *filtered = RDFFilteredObjects(self, objects);
+    NSArray *filtered = RDFFilteredObjects(self, objects, adapter);
     if (filtered.count != objects.count) {
         NSLog(@"[RDF] %@ -> %lu/%lu (days=%g)",
               NSStringFromClass([self class]),
@@ -468,6 +532,197 @@ static NSString *RDFHumanDuration(double days)
 
 @end
 
+
+#pragma mark - Scope sheet
+
+static NSString *RDFDaysSummary(void)
+{
+    double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
+    if (fabs(days) < RG_FILTER_MIN_DAYS) return @"未设置";
+    NSString *human = RDFHumanDuration(days);
+    return days > 0 ? [human stringByAppendingString:@"内"] : [human stringByAppendingString:@"以前"];
+}
+
+@interface RDFScopeViewController : UIViewController
+@end
+
+@implementation RDFScopeViewController {
+    UIView *_dim;
+    UIView *_card;
+    UILabel *_daysValue;
+    NSMutableArray<UISwitch *> *_switches;
+}
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.modalPresentationStyle = UIModalPresentationOverFullScreen;
+
+    _dim = [[UIView alloc] initWithFrame:self.view.bounds];
+    _dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    _dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_dim];
+
+    _card = [[UIView alloc] initWithFrame:CGRectZero];
+    _card.backgroundColor = [UIColor colorWithWhite:0.17 alpha:0.98];
+    _card.layer.cornerRadius = 16;
+    _card.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.view addSubview:_card];
+
+    UILabel *title = [self label:@"时间过滤" size:16.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.tag = 1;
+    [_card addSubview:title];
+
+    UILabel *subtitle = [self label:@"选择在哪些页面生效" size:11.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    subtitle.textAlignment = NSTextAlignmentCenter;
+    subtitle.tag = 2;
+    [_card addSubview:subtitle];
+
+    NSArray *names = @[@"首页", @"Reels", @"搜索 / 发现", @"个人主页"];
+    NSInteger mask = RDFScopeMask();
+    _switches = [NSMutableArray array];
+    for (NSUInteger i = 0; i < names.count; i++) {
+        UILabel *label = [self label:names[i] size:14 weight:UIFontWeightRegular color:UIColor.whiteColor];
+        label.tag = 10 + i;
+        [_card addSubview:label];
+
+        UISwitch *toggle = [[UISwitch alloc] init];
+        toggle.onTintColor = [UIColor colorWithRed:0.49 green:0.23 blue:0.93 alpha:1];
+        toggle.tag = 20 + i;
+        toggle.on = (mask & (1 << i)) != 0;
+        [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+        [_card addSubview:toggle];
+        [_switches addObject:toggle];
+    }
+
+    UIView *separator = [[UIView alloc] initWithFrame:CGRectZero];
+    separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    separator.tag = 3;
+    [_card addSubview:separator];
+
+    UIButton *daysRow = [UIButton buttonWithType:UIButtonTypeCustom];
+    daysRow.tag = 30;
+    [daysRow addTarget:self action:@selector(editDays) forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:daysRow];
+
+    UILabel *daysTitle = [self label:@"过滤时长" size:14 weight:UIFontWeightRegular color:UIColor.whiteColor];
+    daysTitle.tag = 31;
+    [daysRow addSubview:daysTitle];
+
+    _daysValue = [self label:RDFDaysSummary() size:13.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    _daysValue.textAlignment = NSTextAlignmentRight;
+    _daysValue.tag = 32;
+    [daysRow addSubview:_daysValue];
+
+    UILabel *chevron = [self label:@"›" size:18 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.45 alpha:1]];
+    chevron.textAlignment = NSTextAlignmentRight;
+    chevron.tag = 33;
+    [daysRow addSubview:chevron];
+
+    UILabel *note = [self label:@"只在你打开的位置过滤。单位是天：1 小时 = 0.0417，30 分钟 = 0.021。"
+                            size:10.5 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.55 alpha:1]];
+    note.numberOfLines = 2;
+    note.tag = 4;
+    [_card addSubview:note];
+
+    UIView *buttonLine = [[UIView alloc] initWithFrame:CGRectZero];
+    buttonLine.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    buttonLine.tag = 5;
+    [_card addSubview:buttonLine];
+
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeCustom];
+    [done setTitle:@"完成" forState:UIControlStateNormal];
+    [done setTitleColor:[UIColor colorWithRed:0.04 green:0.52 blue:1 alpha:1] forState:UIControlStateNormal];
+    done.titleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
+    done.tag = 6;
+    [done addTarget:self action:@selector(done) forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:done];
+}
+
+- (UILabel *)label:(NSString *)text size:(CGFloat)size weight:(UIFontWeight)weight color:(UIColor *)color
+{
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+    label.text = text;
+    label.font = [UIFont systemFontOfSize:size weight:weight];
+    label.textColor = color;
+    return label;
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    [self refreshDays];
+}
+
+- (void)refreshDays
+{
+    _daysValue.text = RDFDaysSummary();
+}
+
+- (void)viewDidLayoutSubviews
+{
+    [super viewDidLayoutSubviews];
+    CGFloat width = 306, height = 432;
+    CGFloat x = (CGRectGetWidth(self.view.bounds) - width) / 2;
+    CGFloat y = (CGRectGetHeight(self.view.bounds) - height) / 2;
+    _card.frame = CGRectMake(x, y, width, height);
+
+    [_card viewWithTag:1].frame = CGRectMake(0, 18, width, 22);
+    [_card viewWithTag:2].frame = CGRectMake(0, 42, width, 16);
+
+    for (NSUInteger i = 0; i < 4; i++) {
+        CGFloat top = 68 + i * 46;
+        [_card viewWithTag:10 + i].frame = CGRectMake(18, top + 12, 180, 20);
+        UISwitch *toggle = (UISwitch *)[_card viewWithTag:20 + i];
+        toggle.frame = CGRectMake(width - 18 - 51, top + 8, 51, 31);
+    }
+
+    [_card viewWithTag:3].frame = CGRectMake(0, 258, width, 1);
+    UIButton *daysRow = (UIButton *)[_card viewWithTag:30];
+    daysRow.frame = CGRectMake(0, 258, width, 46);
+    [daysRow viewWithTag:31].frame = CGRectMake(18, 13, 140, 20);
+    [daysRow viewWithTag:32].frame = CGRectMake(width - 100, 15, 76, 18);
+    [daysRow viewWithTag:33].frame = CGRectMake(width - 26, 10, 18, 26);
+
+    [_card viewWithTag:4].frame = CGRectMake(18, 310, width - 36, 32);
+
+    [_card viewWithTag:5].frame = CGRectMake(0, 384, width, 1);
+    [_card viewWithTag:6].frame = CGRectMake(0, 385, width, 47);
+}
+
+- (void)toggleChanged:(UISwitch *)toggle
+{
+    NSInteger index = toggle.tag - 20;
+    NSInteger mask = RDFScopeMask();
+    if (toggle.isOn) mask |= (1 << index);
+    else mask &= ~(1 << index);
+    RDFSetScopeMask(mask);
+    RDFReloadLists();
+}
+
+- (void)editDays
+{
+    RDFInputViewController *controller = [RDFInputViewController new];
+    controller.initialDays = [[NSUserDefaults standardUserDefaults] doubleForKey:kRDFDaysKey];
+    __weak typeof(self) weakSelf = self;
+    controller.onCommit = ^(double days) {
+        [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kRDFDaysKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        [weakSelf refreshDays];
+        RDFReloadLists();
+    };
+    [self presentViewController:controller animated:YES completion:nil];
+}
+
+- (void)done
+{
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
 @interface RDFConfigurator : NSObject
 + (instancetype)shared;
 - (void)presentFrom:(UIViewController *)host;
@@ -488,7 +743,9 @@ static NSString *RDFHumanDuration(double days)
 - (void)settingsTapped:(UIBarButtonItem *)sender
 {
     UIViewController *host = objc_getAssociatedObject(sender, kRDFHostKey.UTF8String);
-    [self presentFrom:host ?: RDFTopViewController()];
+    host = host ?: RDFTopViewController();
+    RDFScopeViewController *controller = [RDFScopeViewController new];
+    [host presentViewController:controller animated:YES completion:nil];
 }
 
 - (void)presentFrom:(UIViewController *)host
