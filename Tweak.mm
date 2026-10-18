@@ -90,6 +90,7 @@ static BOOL RDFLooksLikeProfileReels(id dataSource, NSArray *objects)
 #pragma mark - Scope
 
 typedef NS_OPTIONS(NSInteger, RDFSurface) {
+    RDFSurfaceNone    = 0,
     RDFSurfaceHome    = 1 << 0,
     RDFSurfaceReels   = 1 << 1,
     RDFSurfaceSearch  = 1 << 2,
