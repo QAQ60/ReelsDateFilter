@@ -701,25 +701,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 
 @interface RDFScopeViewController : UIViewController
 - (void)refreshValues;
-- (void)showDiagnostics:(UILongPressGestureRecognizer *)gesture
-{
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    @synchronized ([NSNull null]) {
-        NSArray *keys = [gRDFStats.allKeys sortedArrayUsingSelector:@selector(compare:)];
-        for (NSString *key in keys) {
-            [lines addObject:[NSString stringWithFormat:@"%@  %@", key, gRDFStats[key]]];
-        }
-    }
-    NSString *text = lines.count ? [lines componentsJoinedByString:@"\n"] : @"还没有捕获到数据源";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"数据源（s=页面 n=条目 d=有日期 k=保留）"
-                                                                   message:text
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
+- (void)showDiagnostics:(UILongPressGestureRecognizer *)gesture;
 @end
 
 @implementation RDFScopeViewController {
