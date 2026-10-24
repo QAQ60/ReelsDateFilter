@@ -309,6 +309,18 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
         if (rg_filter_should_keep(filter, age)) [kept addObject:object];
     }
 
+    if (kept.count == 0 && objects.count > 0) {
+        // An empty profile grid makes Instagram fall back to recommendations,
+        // which look like the profile but open unrelated media. Keep the list.
+        @synchronized ([NSNull null]) {
+            if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
+            gRDFStats[NSStringFromClass([dataSource class])] =
+                [NSString stringWithFormat:@"s=%ld n=%lu d=%lu k=0(回退)",
+                 (long)surface, (unsigned long)objects.count, (unsigned long)dated];
+        }
+        return objects;
+    }
+
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
         gRDFStats[NSStringFromClass([dataSource class])] =
@@ -1111,6 +1123,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
+    NSLog(@"[RDF] ReelsDateFilter v0.5.3 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
