@@ -396,120 +396,6 @@ static BOOL RDFAdapterIsOffscreen(id adapter)
     return view.window == nil;
 }
 
-// Reels on Instagram share one data source family: the Reels tab, the reels
-// segment on a profile and the viewer all read it. When a reel is tapped the
-// viewer reuses whatever list is already built, so a filtered list that is not
-// the exact list on screen makes the viewer look up an item that is no longer
-// there and fall back to its first item — the "jumps back to the same video"
-// bug. Filtering is therefore fail-closed: only a reels list owned by the
-// controller that is actually on screen, inside the tab hierarchy and not
-// hosted by a profile page keeps its filter. Everything else keeps every item.
-static BOOL RDFIsReelsSource(id dataSource)
-{
-    NSString *name = NSStringFromClass([dataSource class]);
-    return [name containsString:@"Sundial"] ||
-           [name containsString:@"Reel"] ||
-           [name containsString:@"Clip"];
-}
-
-static BOOL RDFControllerChainContains(UIViewController *controller, NSString *needle)
-{
-    UIViewController *cursor = controller;
-    for (NSInteger depth = 0; depth < 10 && cursor; depth++) {
-        if ([NSStringFromClass([cursor class]) containsString:needle]) return YES;
-        cursor = cursor.parentViewController;
-    }
-    return NO;
-}
-
-static BOOL RDFControllerIsPresented(UIViewController *controller)
-{
-    if (controller.presentingViewController != nil) return YES;
-    if (controller.navigationController.presentingViewController != nil) return YES;
-    return NO;
-}
-
-static BOOL RDFControllerInsideTabs(UIViewController *controller)
-{
-    UIViewController *cursor = controller;
-    for (NSInteger depth = 0; depth < 10 && cursor; depth++) {
-        if ([cursor isKindOfClass:[UITabBarController class]]) return YES;
-        NSString *name = NSStringFromClass([cursor class]);
-        if ([name containsString:@"TabBar"] || [name containsString:@"TabController"]) return YES;
-        cursor = cursor.parentViewController;
-    }
-    return NO;
-}
-
-// In this build the viewer is not a modal: it is a child controller hosted by
-// the reels tab and it carries the very same class name as the tab, so every
-// other signal matches the tab exactly (owner == visible, not presented,
-// inside the tab hierarchy). What still differs is the containment: the viewer
-// sits inside another controller of its own family, while the tab's own
-// controller sits inside the tab bar. Treat any reels controller nested inside
-// a reels controller as the viewer and leave its list alone.
-static BOOL RDFControllerNestedInSameFamily(UIViewController *owner)
-{
-    UIViewController *parentVC = owner.parentViewController;
-    if (!parentVC) return NO;
-    NSString *ownerName = NSStringFromClass([owner class]);
-    NSString *parentName = NSStringFromClass([parentVC class]);
-    for (NSString *token in @[@"Sundial", @"Reel"]) {
-        if ([ownerName containsString:token] && [parentName containsString:token]) return YES;
-    }
-    return NO;
-}
-
-// Non-nil means "do not filter this reels list", and the string names the rule
-// that fired so the on-device diagnostics can tell the paths apart.
-static NSString *RDFReelsListGuardReason(id adapter, id dataSource, UIViewController *visible)
-{
-    if (!RDFIsReelsSource(dataSource)) return nil;
-
-    UIViewController *owner = RDFAdapterViewController(adapter);
-    if (!owner) return @"reelsNoOwner";
-    if (RDFControllerNestedInSameFamily(owner)) return @"reelsNested";
-    if (RDFControllerChainContains(owner, @"Profile")) return @"profileReels";
-    if (visible && owner != visible) return @"reelsNotVisible";
-    if (RDFControllerIsPresented(owner)) return @"reelsPresented";
-    if (!RDFControllerInsideTabs(owner)) return @"reelsNoTabs";
-    return nil;
-}
-
-// A player owns the screen when the visible controller chain ends at one, or
-// when a tracked player is still visible with nothing presented over it. A
-// profile page opened on top of the player does not count: the player keeps
-// its view in the window but has presentedViewController set, so the profile
-// grid must keep filtering.
-static BOOL RDFIsPlayerActive(NSString *topControllerName)
-{
-    if (RDFIsPlayerControllerName(topControllerName)) return YES;
-
-    @synchronized ([NSNull null]) {
-        if (gRDFActivePlayers.count == 0) return NO;
-        NSMutableArray *stale = [NSMutableArray array];
-        BOOL active = NO;
-        for (id player in gRDFActivePlayers) {
-            if (![player isKindOfClass:[UIViewController class]]) continue;
-            UIViewController *vc = (UIViewController *)player;
-            @try {
-                if (!vc.isViewLoaded || vc.view.window == nil ||
-                    vc.presentedViewController != nil || vc.isBeingDismissed) {
-                    if (player) [stale addObject:player];
-                    continue;
-                }
-                active = YES;
-            } @catch (__unused NSException *exception) {
-                if (player) [stale addObject:player];
-            }
-        }
-        for (id player in stale) {
-            [gRDFActivePlayers removeObject:player];
-        }
-        return active;
-    }
-}
-
 static void RDFTrackPlayerAppearance(id self)
 {
     if (![self isKindOfClass:[UIViewController class]]) return;
@@ -534,16 +420,19 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 {
     if (objects.count == 0) return objects;
 
-    // Filtering reels is what breaks playback, so the decision is fail-closed:
-    // a reels list is filtered only when it belongs to the controller the user
-    // is actually looking at (see RDFReelsListGuardReason). The remaining rules
-    // cover the non-reels surfaces and the player lifetime.
+    // Two questions decide everything, in this order:
+    //   1. Is a profile page on screen? Then leave every list alone. A profile's
+    //      reel list is exactly what the viewer receives on a tap, so trimming
+    //      it makes the viewer open the wrong reel.
+    //   2. Otherwise filter normally, unless the list belongs to a player right
+    //      now (its own adapter, a presented overlay, or a collection view that
+    //      is not on screen yet).
     BOOL hasModal = NO;
     BOOL sawProfile = NO;
     UIViewController *visibleController = RDFResolveVisibleControllerObject(&hasModal, &sawProfile);
     NSString *topController = visibleController
         ? NSStringFromClass([visibleController class]) : @"?";
-    BOOL playerActive = RDFIsPlayerActive(topController);
+    BOOL playerVisible = RDFIsPlayerControllerName(topController);
     BOOL sundialOverlay = hasModal && [topController containsString:@"Sundial"];
     BOOL adapterOffscreen = RDFAdapterIsOffscreen(adapter);
     UIViewController *adapterVC = RDFAdapterViewController(adapter);
@@ -551,30 +440,26 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
         RDFIsPlayerControllerName(NSStringFromClass([adapterVC class]));
     BOOL viewerContext = RDFIsViewerContext(adapter, dataSource) || RDFAdapterIsPlayer(adapter);
 
-    // A profile page is left completely alone: the user asked for their own
-    // feed to be filtered, not for other people's pages to be emptied. Every
-    // list a profile builds (posts grid, reels segment, the viewer it opens)
-    // keeps all of its items.
-    NSString *rule = sawProfile
-        ? @"profilePage"
-        : (RDFReelsListGuardReason(adapter, dataSource, visibleController) ?: @"none");
-    if ([rule isEqualToString:@"none"]) {
-        if (playerActive) rule = @"player";
-        else if (sundialOverlay) rule = @"modal";
-        else if (adapterVCIsPlayer) rule = @"adapterPlayer";
-        else if (adapterOffscreen) rule = @"offscreen";
-        else if (viewerContext) rule = @"viewer";
-    }
+    NSString *rule = @"none";
+    if (sawProfile) rule = @"profilePage";
+    else if (sundialOverlay) rule = @"modal";
+    else if (playerVisible) rule = @"player";
+    else if (adapterVCIsPlayer) rule = @"adapterPlayer";
+    else if (adapterOffscreen) rule = @"offscreen";
+    else if (viewerContext) rule = @"viewer";
     BOOL guarded = ![rule isEqualToString:@"none"];
 
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
-        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ parent=%@ ds=%@ 主页=%d 弹窗=%d 离屏=%d 跳过=%d",
+        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ ds=%@ 主页=%d 弹窗=%d 离屏=%d 跳过=%d",
                                rule, topController,
                                adapterVC ? NSStringFromClass([adapterVC class]) : @"?",
-                               adapterVC.parentViewController ? NSStringFromClass([adapterVC.parentViewController class]) : @"-",
                                NSStringFromClass([dataSource class]),
                                sawProfile, hasModal, adapterOffscreen, guarded];
+        if (guarded) {
+            gRDFStats[@"#跳过"] = [NSString stringWithFormat:@"%@ ds=%@", rule,
+                                   NSStringFromClass([dataSource class])];
+        }
     }
 
     if (guarded) return objects;
@@ -1062,7 +947,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v0.9.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.0.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1458,7 +1343,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.9.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.0.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
