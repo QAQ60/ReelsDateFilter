@@ -41,6 +41,7 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 - `IGListAdapter setDataSource:` 被 hook，拿到当前页面的数据源对象
 - 在数据源类上替换 `objectsForListAdapter:`，返回前按 `media.takenAtDate` 过滤
 - 只处理类名含 `Sundial` / `Reel` / `Clip` 的数据源或对象，避免影响首页和「作品」标签
+- 播放器在屏时不过滤：顶层控制器沿 `presentedViewController` → 导航栈可见控制器 → 选中 Tab → 容器子控制器逐层解析，再配合播放器生命周期跟踪（viewDidAppear 记录、被 Modal 盖住或移出窗口即失效）。Reels 列表与播放器共用 `IGSundialFeedDataSource`，不过滤会让播放器回退到列表第一条，表现为「跳回同一条视频」
 - 取不到发布时间的条目一律保留，不误杀
 - 输入解析与判断逻辑在 `rg_date_filter.c`，纯 C，27 条断言（`core/tests.c` 于提案目录中）
 
