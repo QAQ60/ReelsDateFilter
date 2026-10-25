@@ -1,6 +1,6 @@
 Package: com.qaq60.reelsdatefilter
 Name: Reels Date Filter
-Version: 0.5.8
+Version: 0.5.9
 Architecture: iphoneos-arm
 Description: Filter the reels tab on Instagram profiles by publish date.
 Maintainer: QAQ60
