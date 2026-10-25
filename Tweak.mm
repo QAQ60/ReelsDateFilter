@@ -437,6 +437,25 @@ static BOOL RDFControllerInsideTabs(UIViewController *controller)
     return NO;
 }
 
+// In this build the viewer is not a modal: it is a child controller hosted by
+// the reels tab and it carries the very same class name as the tab, so every
+// other signal matches the tab exactly (owner == visible, not presented,
+// inside the tab hierarchy). What still differs is the containment: the viewer
+// sits inside another controller of its own family, while the tab's own
+// controller sits inside the tab bar. Treat any reels controller nested inside
+// a reels controller as the viewer and leave its list alone.
+static BOOL RDFControllerNestedInSameFamily(UIViewController *owner)
+{
+    UIViewController *parentVC = owner.parentViewController;
+    if (!parentVC) return NO;
+    NSString *ownerName = NSStringFromClass([owner class]);
+    NSString *parentName = NSStringFromClass([parentVC class]);
+    for (NSString *token in @[@"Sundial", @"Reel"]) {
+        if ([ownerName containsString:token] && [parentName containsString:token]) return YES;
+    }
+    return NO;
+}
+
 // Non-nil means "do not filter this reels list", and the string names the rule
 // that fired so the on-device diagnostics can tell the paths apart.
 static NSString *RDFReelsListGuardReason(id adapter, id dataSource, UIViewController *visible)
@@ -445,6 +464,7 @@ static NSString *RDFReelsListGuardReason(id adapter, id dataSource, UIViewContro
 
     UIViewController *owner = RDFAdapterViewController(adapter);
     if (!owner) return @"reelsNoOwner";
+    if (RDFControllerNestedInSameFamily(owner)) return @"reelsNested";
     if (RDFControllerChainContains(owner, @"Profile")) return @"profileReels";
     if (visible && owner != visible) return @"reelsNotVisible";
     if (RDFControllerIsPresented(owner)) return @"reelsPresented";
@@ -538,9 +558,10 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
-        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ ds=%@ 弹窗=%d 离屏=%d 跳过=%d",
+        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ parent=%@ ds=%@ 弹窗=%d 离屏=%d 跳过=%d",
                                rule, topController,
                                adapterVC ? NSStringFromClass([adapterVC class]) : @"?",
+                               adapterVC.parentViewController ? NSStringFromClass([adapterVC.parentViewController class]) : @"-",
                                NSStringFromClass([dataSource class]),
                                hasModal, adapterOffscreen, guarded];
     }
@@ -1030,7 +1051,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v0.7.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v0.8.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1411,7 +1432,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.7.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v0.8.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
