@@ -528,6 +528,12 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     NSString *rule = @"none";
     if (sawProfile) rule = @"profilePage";
     else if (RDFAdapterViewInsideProfile(adapter)) rule = @"profileView";
+    // The viewer builds a short playlist around the tapped reel (4–6 items in
+    // the captures), while the tab's feed loads far more (16–39). A short reels
+    // list carries no other marker that separates it from the tab's, and
+    // trimming it is exactly what makes the viewer open the wrong reel, so short
+    // lists are always left intact.
+    else if (RDFIsReelsSource(dataSource) && objects.count < 8) rule = @"smallList";
     else if (RDFIsReelsSource(dataSource) && adapterVC && RDFNestedInExactSameClass(adapterVC)) rule = @"reelsNested";
     else if (RDFIsReelsSource(dataSource) && adapterVC && RDFPushedFromProfile(adapterVC)) rule = @"pushedReels";
     else if (sundialOverlay) rule = @"modal";
@@ -1035,7 +1041,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.4.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.5.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1431,7 +1437,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.4.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.5.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
