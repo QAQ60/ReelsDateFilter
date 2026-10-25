@@ -312,9 +312,10 @@ static BOOL RDFIsViewerContext(id adapter, id dataSource)
 // whether the chain passed through at least one modal presentation, which is
 // how the reel viewer (same class name as the tab in some builds) is told
 // apart from the tab itself.
-static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal)
+static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal, BOOL *outSawProfile)
 {
     BOOL hasModal = NO;
+    BOOL sawProfile = NO;
     UIWindow *window = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -326,6 +327,7 @@ static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal)
 
     UIViewController *controller = window.rootViewController;
     for (NSInteger depth = 0; depth < 12 && controller; depth++) {
+        if ([NSStringFromClass([controller class]) containsString:@"Profile"]) sawProfile = YES;
         UIViewController *next = nil;
 
         if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
@@ -350,7 +352,9 @@ static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal)
         if (!next || next == controller) break;
         controller = next;
     }
+    if (controller && [NSStringFromClass([controller class]) containsString:@"Profile"]) sawProfile = YES;
     if (outHasModal) *outHasModal = hasModal;
+    if (outSawProfile) *outSawProfile = sawProfile;
     return controller;
 }
 
@@ -535,7 +539,8 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     // is actually looking at (see RDFReelsListGuardReason). The remaining rules
     // cover the non-reels surfaces and the player lifetime.
     BOOL hasModal = NO;
-    UIViewController *visibleController = RDFResolveVisibleControllerObject(&hasModal);
+    BOOL sawProfile = NO;
+    UIViewController *visibleController = RDFResolveVisibleControllerObject(&hasModal, &sawProfile);
     NSString *topController = visibleController
         ? NSStringFromClass([visibleController class]) : @"?";
     BOOL playerActive = RDFIsPlayerActive(topController);
@@ -546,7 +551,13 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
         RDFIsPlayerControllerName(NSStringFromClass([adapterVC class]));
     BOOL viewerContext = RDFIsViewerContext(adapter, dataSource) || RDFAdapterIsPlayer(adapter);
 
-    NSString *rule = RDFReelsListGuardReason(adapter, dataSource, visibleController) ?: @"none";
+    // A profile page is left completely alone: the user asked for their own
+    // feed to be filtered, not for other people's pages to be emptied. Every
+    // list a profile builds (posts grid, reels segment, the viewer it opens)
+    // keeps all of its items.
+    NSString *rule = sawProfile
+        ? @"profilePage"
+        : (RDFReelsListGuardReason(adapter, dataSource, visibleController) ?: @"none");
     if ([rule isEqualToString:@"none"]) {
         if (playerActive) rule = @"player";
         else if (sundialOverlay) rule = @"modal";
@@ -558,12 +569,12 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
-        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ parent=%@ ds=%@ 弹窗=%d 离屏=%d 跳过=%d",
+        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ parent=%@ ds=%@ 主页=%d 弹窗=%d 离屏=%d 跳过=%d",
                                rule, topController,
                                adapterVC ? NSStringFromClass([adapterVC class]) : @"?",
                                adapterVC.parentViewController ? NSStringFromClass([adapterVC.parentViewController class]) : @"-",
                                NSStringFromClass([dataSource class]),
-                               hasModal, adapterOffscreen, guarded];
+                               sawProfile, hasModal, adapterOffscreen, guarded];
     }
 
     if (guarded) return objects;
@@ -1051,7 +1062,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v0.8.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v0.9.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1081,6 +1092,17 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
         toggle.on = (mask & (1 << i)) != 0;
         [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
         [_card addSubview:toggle];
+
+        // Profile pages are deliberately never filtered: their reel list is what
+        // the viewer receives, so trimming it makes the viewer open the wrong
+        // reel. The row stays visible for clarity but is not editable.
+        if ((RDFSurface)(1 << i) == RDFSurfaceProfile) {
+            row.enabled = NO;
+            toggle.enabled = NO;
+            toggle.on = NO;
+            name.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+            value.text = @"不过滤";
+        }
     }
 
     UIView *separator = [[UIView alloc] initWithFrame:CGRectZero];
@@ -1125,6 +1147,10 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 - (void)refreshValues
 {
     for (NSUInteger i = 0; i < _valueLabels.count; i++) {
+        if ((RDFSurface)(1 << i) == RDFSurfaceProfile) {
+            _valueLabels[i].text = @"不过滤";
+            continue;
+        }
         _valueLabels[i].text = RDFDaysSummaryForSurface((RDFSurface)(1 << i));
     }
 }
@@ -1432,7 +1458,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.8.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v0.9.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
