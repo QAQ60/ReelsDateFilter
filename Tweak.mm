@@ -372,6 +372,48 @@ static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal, BO
     return controller;
 }
 
+// The descent above only walks the chain the app says is visible. A profile can
+// still be on screen underneath the viewer (or mid-transition) without being on
+// that chain, and that is exactly when its reel list is rebuilt and trimmed.
+// Scan the whole window instead: if any loaded controller of the profile family
+// has its view attached, the user is looking at a profile (or something opened
+// from one), so nothing on that screen may be filtered.
+static BOOL RDFWindowShowsProfile(void)
+{
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            if (candidate.isKeyWindow) { window = candidate; break; }
+        }
+    }
+    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+    if (!window.rootViewController) return NO;
+
+    NSMutableArray<UIViewController *> *queue = [NSMutableArray arrayWithObject:window.rootViewController];
+    NSInteger visited = 0;
+    while (queue.count > 0 && visited < 300) {
+        visited++;
+        UIViewController *controller = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+
+        if (controller.isViewLoaded && controller.view.window == window &&
+            [NSStringFromClass([controller class]) containsString:@"Profile"]) {
+            return YES;
+        }
+
+        if (controller.presentedViewController &&
+            !controller.presentedViewController.isBeingDismissed) {
+            [queue addObject:controller.presentedViewController];
+        }
+        if ([controller isKindOfClass:[UINavigationController class]]) {
+            [queue addObjectsFromArray:((UINavigationController *)controller).viewControllers];
+        }
+        [queue addObjectsFromArray:controller.childViewControllers];
+    }
+    return NO;
+}
+
 static UIViewController *RDFAdapterViewController(id adapter)
 {
     if (![adapter respondsToSelector:@selector(viewController)]) return nil;
@@ -524,9 +566,11 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     BOOL adapterVCIsPlayer = adapterVC &&
         RDFIsPlayerControllerName(NSStringFromClass([adapterVC class]));
     BOOL viewerContext = RDFIsViewerContext(adapter, dataSource) || RDFAdapterIsPlayer(adapter);
+    BOOL profileOnScreen = RDFWindowShowsProfile();
 
     NSString *rule = @"none";
     if (sawProfile) rule = @"profilePage";
+    else if (profileOnScreen) rule = @"profileWindow";
     else if (RDFAdapterViewInsideProfile(adapter)) rule = @"profileView";
     // The viewer builds a short playlist around the tapped reel (4–6 items in
     // the captures), while the tab's feed loads far more (16–39). A short reels
@@ -545,11 +589,11 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
-        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ ds=%@ 主页=%d 弹窗=%d 离屏=%d 跳过=%d",
+        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"规则=%@ top=%@ owner=%@ ds=%@ 主页=%d 窗口主页=%d 弹窗=%d 离屏=%d 跳过=%d",
                                rule, topController,
                                adapterVC ? NSStringFromClass([adapterVC class]) : @"?",
                                NSStringFromClass([dataSource class]),
-                               sawProfile, hasModal, adapterOffscreen, guarded];
+                               sawProfile, profileOnScreen, hasModal, adapterOffscreen, guarded];
         if (guarded) {
             gRDFStats[@"#跳过"] = [NSString stringWithFormat:@"%@ ds=%@", rule,
                                    NSStringFromClass([dataSource class])];
@@ -1041,7 +1085,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.5.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.6.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1437,7 +1481,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.5.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.6.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
