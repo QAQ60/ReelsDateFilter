@@ -41,6 +41,7 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 - `IGListAdapter setDataSource:` 被 hook，拿到当前页面的数据源对象
 - 在数据源类上替换 `objectsForListAdapter:`，返回前按 `media.takenAtDate` 过滤
 - 只处理类名含 `Sundial` / `Reel` / `Clip` 的数据源或对象，避免影响首页和「作品」标签
+- **主页（任何人）一律不过滤**：从窗口根到当前可见控制器的解析路径只要经过主页控制器，整页所有列表原样返回（诊断里 `规则=profilePage`）。主页里的 Reels 分段/视频列表就是播放器的取数来源，砍条目必然导致播放器打不开被点的那条。设置面板里「个人主页」一行标注为「不过滤」且不可编辑。
 - Reels 列表采用**默认不过滤**策略：只有「归属控制器就是当前屏幕上那个控制器、位于标签栏体系内、且不是主页承载的」Reels 列表才过滤。任何一条不满足就不动它——宁可少过滤，也不让播放器拿到缺条目的列表。这是 0.5.4～0.6.0 反复「跳回同一条视频」后改的方向：以前是尽量识别播放器再放过，现在反过来，只有确认是用户正看着的那份列表才动手。诊断行 `#守卫` 打印命中的规则名：`reelsNested`（播放器嵌套在标签页内）/ `profileReels`（主页承载）/ `reelsNotVisible`（列表不属于当前屏幕）/ `reelsPresented`（控制器被 present）/ `reelsNoTabs`（不在标签栏体系）/ `reelsNoOwner`（取不到归属）/ `player` / `modal` / `adapterPlayer` / `offscreen` / `viewer` / `none`
 - 取不到发布时间的条目一律保留，不误杀
 - 输入解析与判断逻辑在 `rg_date_filter.c`，纯 C，27 条断言（`core/tests.c` 于提案目录中）
