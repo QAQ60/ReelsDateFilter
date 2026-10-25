@@ -354,11 +354,6 @@ static NSString *RDFResolveVisibleController(BOOL *outHasModal)
     return controller ? NSStringFromClass([controller class]) : @"?";
 }
 
-static NSString *RDFVisibleControllerName(void)
-{
-    return RDFResolveVisibleController(NULL);
-}
-
 static UIViewController *RDFAdapterViewController(id adapter)
 {
     if (![adapter respondsToSelector:@selector(viewController)]) return nil;
