@@ -263,9 +263,36 @@ static RDFSurface RDFSurfaceForDataSourceClass(id dataSource)
     return RDFSurfaceNone;
 }
 
+static BOOL RDFIsViewerContext(id adapter, id dataSource)
+{
+    UIView *view = nil;
+    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
+        @try {
+            id candidate = [adapter valueForKey:key];
+            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
+        } @catch (__unused NSException *exception) {}
+    }
+    if (!view) return NO;
+
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            NSString *name = NSStringFromClass([responder class]);
+            if ([name containsString:@"Viewer"] || [name containsString:@"SundialVideo"]) return YES;
+        }
+        responder = [responder nextResponder];
+    }
+    return NO;
+}
+
 static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 {
     if (objects.count == 0) return objects;
+
+    // The reel viewer reuses the Reels data source. Filtering it makes the
+    // viewer fall back to the first item when the tapped reel is out of range,
+    // which looks like "always jumping back to the same video".
+    if (RDFIsViewerContext(adapter, dataSource)) return objects;
 
     RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
     if (surface == RDFSurfaceNone) surface = RDFSurfaceForDataSourceClass(dataSource);
@@ -746,7 +773,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v0.5.4 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v0.5.5 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1126,7 +1153,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.5.4 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v0.5.5 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
