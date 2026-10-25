@@ -308,9 +308,13 @@ static BOOL RDFIsViewerContext(id adapter, id dataSource)
 // why the old guard saw t=IGRootViewController while a player was on screen.
 // Descend through the visible child chain instead: a modal wins, then the
 // visible view controller of a navigation stack, the selected tab, or the
-// container child whose view is attached to the window.
-static NSString *RDFVisibleControllerName(void)
+// container child whose view is attached to the window. outHasModal reports
+// whether the chain passed through at least one modal presentation, which is
+// how the reel viewer (same class name as the tab in some builds) is told
+// apart from the tab itself.
+static NSString *RDFResolveVisibleController(BOOL *outHasModal)
 {
+    BOOL hasModal = NO;
     UIWindow *window = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -326,6 +330,7 @@ static NSString *RDFVisibleControllerName(void)
 
         if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
             next = controller.presentedViewController;
+            hasModal = YES;
         } else if ([controller isKindOfClass:[UINavigationController class]]) {
             next = [(UINavigationController *)controller visibleViewController];
         } else if ([controller isKindOfClass:[UITabBarController class]]) {
@@ -345,7 +350,13 @@ static NSString *RDFVisibleControllerName(void)
         if (!next || next == controller) break;
         controller = next;
     }
+    if (outHasModal) *outHasModal = hasModal;
     return controller ? NSStringFromClass([controller class]) : @"?";
+}
+
+static NSString *RDFVisibleControllerName(void)
+{
+    return RDFResolveVisibleController(NULL);
 }
 
 static UIViewController *RDFAdapterViewController(id adapter)
@@ -364,6 +375,26 @@ static BOOL RDFAdapterIsPlayer(id adapter)
 {
     UIViewController *owner = RDFAdapterViewController(adapter);
     return owner && RDFIsPlayerControllerName(NSStringFromClass([owner class]));
+}
+
+// The reel viewer builds its list through its own IGListAdapter before it is
+// presented: the adapter exists, the data source is queried, and only then
+// does the viewer go on screen. Every screen-based guard misses that window,
+// which is exactly when the shared data source gets filtered and the tapped
+// video disappears. An adapter whose collection view is not attached to a
+// window yet is preparing a list, so never filter it — the tab's collection
+// view is always on screen when the user is looking at it.
+static BOOL RDFAdapterIsOffscreen(id adapter)
+{
+    UIView *view = nil;
+    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
+        @try {
+            id candidate = [adapter valueForKey:key];
+            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
+        } @catch (__unused NSException *exception) {}
+    }
+    if (!view) return YES;
+    return view.window == nil;
 }
 
 // A player owns the screen when the visible controller chain ends at one, or
@@ -402,12 +433,21 @@ static BOOL RDFIsPlayerActive(NSString *topControllerName)
 
 static void RDFTrackPlayerAppearance(id self)
 {
-    if (!RDFIsPlayerControllerName(NSStringFromClass([self class]))) return;
+    if (![self isKindOfClass:[UIViewController class]]) return;
+    NSString *name = NSStringFromClass([self class]);
+    UIViewController *vc = (UIViewController *)self;
+    // The viewer's class name can be the very same IGSundialFeedViewController
+    // the Reels tab uses, so the keyword list alone is not enough. A controller
+    // from the Sundial family that was modally presented is always the player:
+    // no tab is ever presented modally.
+    BOOL isPlayer = RDFIsPlayerControllerName(name) ||
+        (vc.presentingViewController != nil && [name containsString:@"Sundial"]);
+    if (!isPlayer) return;
     @synchronized ([NSNull null]) {
         if (!gRDFActivePlayers) gRDFActivePlayers = [NSHashTable weakObjectsHashTable];
         [gRDFActivePlayers addObject:self];
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
-        gRDFStats[@"#播放器"] = NSStringFromClass([self class]);
+        gRDFStats[@"#播放器"] = name;
     }
 }
 
@@ -416,19 +456,31 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     if (objects.count == 0) return objects;
 
     // The Reels tab and the reel viewer share the same data source class, and
-    // the viewer queries it when a profile video is tapped. Skip filtering
-    // whenever a player owns the screen so the viewer keeps the full list and
-    // can open the tapped reel; otherwise a video older than the Reels window
-    // is dropped from the viewer's list and the player falls back to the first
-    // item, which is the "jumps back to the same video" bug.
-    NSString *topController = RDFVisibleControllerName();
+    // the viewer queries it when a profile video is tapped. Screen-based guards
+    // alone cannot see that moment: the viewer builds its list through its own
+    // adapter *before* it is presented, so the top controller is still the tab
+    // or the profile grid. Skip filtering on two structural signals instead:
+    // (1) the controller chain passes through a modal and ends in the Sundial
+    // family — a player owns the screen; (2) the querying adapter's collection
+    // view is not in a window yet — a list is being prepared, never by the tab
+    // (its collection view is always on screen when the user is looking at
+    // it). The Reels filter keeps working through both rules.
+    BOOL hasModal = NO;
+    NSString *topController = RDFResolveVisibleController(&hasModal);
     BOOL playerActive = RDFIsPlayerActive(topController);
-    BOOL guarded = playerActive || RDFIsViewerContext(adapter, dataSource) || RDFAdapterIsPlayer(adapter);
+    BOOL sundialOverlay = hasModal && [topController containsString:@"Sundial"];
+    BOOL adapterOffscreen = RDFAdapterIsOffscreen(adapter);
+    UIViewController *adapterVC = RDFAdapterViewController(adapter);
+    BOOL adapterVCIsPlayer = adapterVC &&
+        RDFIsPlayerControllerName(NSStringFromClass([adapterVC class]));
+    BOOL guarded = playerActive || sundialOverlay || adapterOffscreen || adapterVCIsPlayer ||
+                   RDFIsViewerContext(adapter, dataSource) || RDFAdapterIsPlayer(adapter);
 
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
-        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"top=%@ 播放器在屏=%d 跳过=%d",
-                               topController, playerActive, guarded];
+        gRDFStats[@"#守卫"] = [NSString stringWithFormat:@"top=%@ 播放器在屏=%d 弹窗=%d Sundial=%d 离屏=%d 适配器控制器=%@ 跳过=%d",
+                               topController, playerActive, hasModal, sundialOverlay, adapterOffscreen,
+                               adapterVC ? NSStringFromClass([adapterVC class]) : @"?", guarded];
     }
 
     if (guarded) return objects;
@@ -913,7 +965,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v0.5.8 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v0.5.9 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1294,7 +1346,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.5.8 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v0.5.9 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
