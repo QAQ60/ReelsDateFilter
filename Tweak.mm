@@ -205,11 +205,26 @@ static void RDFSetDaysForSurface(RDFSurface surface, double days)
 }
 
 static NSString *const kRDFScopeKey = @"RDFScope";
+static NSString *const kRDFReelsOffKey = @"RDFReelsOffDefault";
 
 static NSInteger RDFScopeMask(void)
 {
-    NSNumber *stored = [[NSUserDefaults standardUserDefaults] objectForKey:kRDFScopeKey];
-    if (!stored) return RDFSurfaceHome | RDFSurfaceReels | RDFSurfaceSearch;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    // From 1.3.0 on the Reels surface starts switched off: Instagram hands the
+    // very same reels list to the viewer, so trimming it makes the viewer open
+    // the wrong reel ("jumps back to the same video"). The switch in the panel
+    // still turns filtering back on for anyone who prefers it.
+    if (![defaults boolForKey:kRDFReelsOffKey]) {
+        NSInteger stored = [defaults objectForKey:kRDFScopeKey]
+            ? [defaults integerForKey:kRDFScopeKey]
+            : (RDFSurfaceHome | RDFSurfaceReels | RDFSurfaceSearch);
+        stored &= ~RDFSurfaceReels;
+        [defaults setInteger:stored forKey:kRDFScopeKey];
+        [defaults setBool:YES forKey:kRDFReelsOffKey];
+        [defaults synchronize];
+    }
+    NSNumber *stored = [defaults objectForKey:kRDFScopeKey];
+    if (!stored) return RDFSurfaceHome | RDFSurfaceSearch;
     return stored.integerValue;
 }
 
@@ -992,7 +1007,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.2.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.3.0 · Reels 默认关闭（会跳视频），开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1388,7 +1403,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.2.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.3.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
