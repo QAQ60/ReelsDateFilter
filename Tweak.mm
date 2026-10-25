@@ -746,7 +746,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v0.5.4 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -884,12 +884,15 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
 
-    NSArray *sources;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
     @synchronized ([NSNull null]) {
-        sources = [gRDFRecentSources copy] ?: @[];
+        NSArray *keys = [gRDFStats.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        for (NSString *key in keys) {
+            [lines addObject:[NSString stringWithFormat:@"%@  %@", key, gRDFStats[key]]];
+        }
     }
-    NSString *text = sources.count ? [sources componentsJoinedByString:@"\n"] : @"还没有捕获到数据源";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已挂上的数据源"
+    NSString *text = lines.count ? [lines componentsJoinedByString:@"\n"] : @"还没有捕获到数据源";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"数据源（s=页 n=条 d=日期 k=留）"
                                                                    message:text
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
@@ -1123,7 +1126,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.5.3 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v0.5.4 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
