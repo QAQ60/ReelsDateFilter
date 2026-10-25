@@ -205,26 +205,25 @@ static void RDFSetDaysForSurface(RDFSurface surface, double days)
 }
 
 static NSString *const kRDFScopeKey = @"RDFScope";
-static NSString *const kRDFReelsOffKey = @"RDFReelsOffDefault";
+static NSString *const kRDFReelsOnKey = @"RDFReelsOnDefault";
 
 static NSInteger RDFScopeMask(void)
 {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    // From 1.3.0 on the Reels surface starts switched off: Instagram hands the
-    // very same reels list to the viewer, so trimming it makes the viewer open
-    // the wrong reel ("jumps back to the same video"). The switch in the panel
-    // still turns filtering back on for anyone who prefers it.
-    if (![defaults boolForKey:kRDFReelsOffKey]) {
+    // 1.3.0 switched Reels off; 1.4.0 turns it back on once, because the
+    // profile's own reels list is now recognised by its view hierarchy and is
+    // never touched.
+    if (![defaults boolForKey:kRDFReelsOnKey]) {
         NSInteger stored = [defaults objectForKey:kRDFScopeKey]
             ? [defaults integerForKey:kRDFScopeKey]
             : (RDFSurfaceHome | RDFSurfaceReels | RDFSurfaceSearch);
-        stored &= ~RDFSurfaceReels;
+        stored |= RDFSurfaceReels;
         [defaults setInteger:stored forKey:kRDFScopeKey];
-        [defaults setBool:YES forKey:kRDFReelsOffKey];
+        [defaults setBool:YES forKey:kRDFReelsOnKey];
         [defaults synchronize];
     }
     NSNumber *stored = [defaults objectForKey:kRDFScopeKey];
-    if (!stored) return RDFSurfaceHome | RDFSurfaceSearch;
+    if (!stored) return RDFSurfaceHome | RDFSurfaceReels | RDFSurfaceSearch;
     return stored.integerValue;
 }
 
@@ -411,6 +410,34 @@ static BOOL RDFAdapterIsOffscreen(id adapter)
     return view.window == nil;
 }
 
+// The profile's reels list is rendered inside the profile page's view, and the
+// responder chain from the collection view passes through IGProfileViewController
+// even when the controller containment chain does not (Instagram hosts the
+// segments in a pager that does not always set parentViewController). The tab's
+// collection view has no profile controller above it, so this separates the two
+// without relying on class names or navigation stacks.
+static BOOL RDFAdapterViewInsideProfile(id adapter)
+{
+    UIView *view = nil;
+    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
+        @try {
+            id candidate = [adapter valueForKey:key];
+            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
+        } @catch (__unused NSException *exception) {}
+    }
+    if (!view) return NO;
+
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UIViewController class]] &&
+            [NSStringFromClass([responder class]) containsString:@"Profile"]) {
+            return YES;
+        }
+        responder = responder.nextResponder;
+    }
+    return NO;
+}
+
 // In this Instagram build the viewer carries the very same class name as the
 // Reels tab, so name matching cannot tell them apart — that is why matching the
 // "Sundial" family as a whole disabled the tab filter too (0.8.0), and why
@@ -500,6 +527,7 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 
     NSString *rule = @"none";
     if (sawProfile) rule = @"profilePage";
+    else if (RDFAdapterViewInsideProfile(adapter)) rule = @"profileView";
     else if (RDFIsReelsSource(dataSource) && adapterVC && RDFNestedInExactSameClass(adapterVC)) rule = @"reelsNested";
     else if (RDFIsReelsSource(dataSource) && adapterVC && RDFPushedFromProfile(adapterVC)) rule = @"pushedReels";
     else if (sundialOverlay) rule = @"modal";
@@ -1007,7 +1035,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.3.0 · Reels 默认关闭（会跳视频），开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.4.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1403,7 +1431,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.3.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.4.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
