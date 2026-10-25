@@ -285,15 +285,38 @@ static BOOL RDFIsViewerContext(id adapter, id dataSource)
     return NO;
 }
 
+static NSString *RDFVisibleControllerName(void)
+{
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            if (candidate.isKeyWindow) { window = candidate; break; }
+        }
+    }
+    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+
+    UIViewController *controller = window.rootViewController;
+    while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+        controller = controller.presentedViewController;
+    }
+    return NSStringFromClass([controller class]);
+}
+
 static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
 {
     if (objects.count == 0) return objects;
 
-    // The Reels tab and the reel viewer share IGSundialFeedDataSource. Filtering
-    // it makes the viewer fall back to the first item when the tapped reel is
-    // outside the range, so this data source is left untouched.
-    NSString *sourceName = NSStringFromClass([dataSource class]);
-    if ([sourceName containsString:@"SundialFeed"]) return objects;
+    // The Reels tab and the reel viewer use separate instances of the same data
+    // source. Skip filtering whenever a player owns the screen so the viewer
+    // keeps the full list and can open the tapped reel.
+    NSString *topController = RDFVisibleControllerName();
+    if ([topController containsString:@"Viewer"] ||
+        [topController containsString:@"Player"] ||
+        [topController containsString:@"Playback"] ||
+        [topController containsString:@"SundialVideo"]) {
+        return objects;
+    }
     if (RDFIsViewerContext(adapter, dataSource)) return objects;
 
     RDFSurface surface = RDFSurfaceForAdapter(adapter, dataSource);
@@ -353,9 +376,10 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     @synchronized ([NSNull null]) {
         if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
         gRDFStats[NSStringFromClass([dataSource class])] =
-            [NSString stringWithFormat:@"s=%ld n=%lu d=%lu k=%lu",
+            [NSString stringWithFormat:@"s=%ld n=%lu d=%lu k=%lu t=%@",
              (long)surface, (unsigned long)objects.count,
-             (unsigned long)dated, (unsigned long)kept.count];
+             (unsigned long)dated, (unsigned long)kept.count,
+             topController];
     }
 
     return kept;
@@ -775,7 +799,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v0.5.6 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v0.5.7 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1155,7 +1179,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v0.5.6 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v0.5.7 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
