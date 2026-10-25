@@ -422,6 +422,23 @@ static BOOL RDFIsReelsSource(id dataSource)
            [name containsString:@"Clip"];
 }
 
+// The reels screen opened from a profile is pushed onto the profile tab's
+// navigation stack, so its navigation controller's root is still the profile
+// page. The Reels tab, by contrast, sits at the root of its own stack. That is
+// the only structural difference that survives the shared class names — and it
+// is enough to keep the profile's reels screen (which feeds the viewer) intact
+// while the tab keeps filtering.
+static BOOL RDFPushedFromProfile(UIViewController *owner)
+{
+    UINavigationController *nav = owner.navigationController;
+    if (!nav) return NO;
+    NSArray<UIViewController *> *stack = nav.viewControllers;
+    if (stack.count == 0) return NO;
+    UIViewController *root = stack.firstObject;
+    if (root == owner) return NO;
+    return [NSStringFromClass([root class]) containsString:@"Profile"];
+}
+
 static void RDFTrackPlayerAppearance(id self)
 {
     if (![self isKindOfClass:[UIViewController class]]) return;
@@ -469,6 +486,7 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     NSString *rule = @"none";
     if (sawProfile) rule = @"profilePage";
     else if (RDFIsReelsSource(dataSource) && adapterVC && RDFNestedInExactSameClass(adapterVC)) rule = @"reelsNested";
+    else if (RDFIsReelsSource(dataSource) && adapterVC && RDFPushedFromProfile(adapterVC)) rule = @"pushedReels";
     else if (sundialOverlay) rule = @"modal";
     else if (playerVisible) rule = @"player";
     else if (adapterVCIsPlayer) rule = @"adapterPlayer";
@@ -974,7 +992,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.1.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.2.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1370,7 +1388,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.1.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.2.0 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
