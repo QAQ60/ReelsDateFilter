@@ -40,7 +40,7 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 - 无 Logos、无 CydiaSubstrate 依赖，构造器里直接 `method_setImplementation`，方便注入非越狱 IPA
 - `IGListAdapter setDataSource:` 被 hook，拿到当前页面的数据源对象
 - 在数据源类上替换 `objectsForListAdapter:`，返回前按 `media.takenAtDate` 过滤
-- 只处理类名含 `Sundial` / `Reel` / `Clip` 的数据源或对象，避免影响首页和「作品」标签
+- 只处理类名含 `Sundial` / `Reel` / `Clip` 的数据源或对象，避免影响无关列表；首页（`IGFeedItem`）和「搜索 / 发现」（`IGDiscoveryGridItem`）不走这道白名单，直接按取到的时间过滤
 - **主页（任何人）一律不过滤**：扫描整个窗口——只要有一个已加载、视图挂在窗口上的主页控制器（包括被播放器盖住的），整页所有列表原样返回（`profileWindow`），不看解析路径、不看导航栈。视图层级也算——只要 Reels 列表的 collectionView 的响应链经过主页控制器（`profileView`），整份不裁剪，即使控制器父子关系断掉也能识别。从窗口根到当前可见控制器的解析路径只要经过主页控制器，整页所有列表原样返回（诊断里 `规则=profilePage`）。主页里的 Reels 分段/视频列表就是播放器的取数来源，砍条目必然导致播放器打不开被点的那条。设置面板里「个人主页」一行标注为「不过滤」且不可编辑。
 - Reels 列表少于 8 条时一律不裁剪（`smallList`）：播放器的播放列表围绕被点的视频构建，通常 4～6 条，长度是它与标签页信息流唯一稳定的差别（后者 16 条以上）。
 - 其余页面正常过滤。**播放器与 Reels 标签页同名**，靠类名分不开，唯一可靠的差别是容器关系：播放器是「同类控制器」的子控制器（`parentViewController` 的类**完全相同**），标签页的父级是导航/标签容器（类不同）。命中时规则名 `reelsNested`。另：主页里点开的 Reels 页面是 push 进主页导航栈的（导航栈根仍是主页），而标签页在自己的导航栈根部——据此跳过主页来路，规则名 `pushedReels`。除此外只有三种情况会放过整份列表：① 解析链经过 Modal 且终点属于 Sundial 家族（播放器盖在最上层）；② 可见控制器本身是播放器类（`Viewer`/`Player`/`Playback`）；③ 查询适配器的 collectionView 还没上屏。规则名分别为 `modal` / `player` / `offscreen`，`#守卫` 一行会打印命中的那条，`#跳过` 记录最近一次被跳过的数据源。
@@ -54,12 +54,25 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 [RDF] 21/32 (days=10)
 ```
 
+## 更新记录
+
+**1.6.1** —— 代码审核修复
+
+- 修掉数据源存在继承关系时的 hook 自身递归：子类没有自己的实现、父类已被替换时，原实现会被记成 hook 本身，调用即栈溢出。现在沿继承链复用父类的原实现，并对「原实现等于 hook」做了兜底
+- 「首页」开关此前被类名白名单整体拦住，实际不生效；现在首页按 `IGFeedItem` 正常过滤
+- `-N`（只看 N 天以前）模式下整页都是新内容时返回空列表，不再放行全量导致这一页过滤失效
+- 刷新列表前检查主线程和 collectionView 是否在屏，避免对已离屏的适配器做更新；`completion` 传空 block 而不是 `nil`
+- 窗口主页扫描改为带深度上限的深搜（原来 300 节点的广度遍历在滚动时每次都跑），并补上 `presentingViewController` 回看：全屏播放器把主页 view 摘出窗口后仍能命中
+- 响应链遍历加深度上限；设置按钮的主机控制器改用弱引用包装，避免悬垂指针
+
+**1.6.0** —— 窗口扫描：只要窗口上存在已加载的主页控制器，整页不过滤（`profileWindow`）
+
 ## 已知限制
 
 - **没有在真机上验证过。** 代码用 Instagram 449 的类名编写（`IGSundialGridVideoViewController`、`objectsForListAdapter:`、`media.takenAtDate`），编译通过，但 hook 是否命中取决于你设备上的 IG 版本。看日志里有没有 `[RDF] hooked` 即可判断。
 - 如果某天 IG 改了数据源实现，过滤会静默失效，按钮仍在，列表不变。
 - **主页里的 Reels 列表不过滤**（主页「作品」网格仍然按「个人主页」时长过滤）。那份列表是播放器的入口，过滤它就会重现「跳回同一条」；两者不可兼得，除非能改写播放器取列表的实现。
-- 分页由 IGListKit 自己管；当前页全被过滤时可能不再自动加载下一页，需要手动下拉。
+- 分页由 IGListKit 自己管；当前页全被过滤时可能不再自动加载下一页，需要手动下拉。`-N`（只看更早）模式第一页若全是新内容会显示为空，这是过滤生效的结果，继续下拉才会取到更早的页
 - 设置页类名必须含 `Setting`，否则按钮不会出现；看日志里有没有 `settings class hooked`。
 
 ## 构建
