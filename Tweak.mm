@@ -233,18 +233,26 @@ static void RDFSetScopeMask(NSInteger mask)
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
+// IGListAdapter 把列表视图放在 collectionView 上；不同版本有的加下划线前缀。
+// 这个查询在后面多处要用，集中一份，避免每次过滤重复做四遍 KVC。
+static UIView *RDFAdapterCollectionView(id adapter)
+{
+    if (!adapter) return nil;
+    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
+        @try {
+            id candidate = [adapter valueForKey:key];
+            if ([candidate isKindOfClass:[UIView class]]) return candidate;
+        } @catch (__unused NSException *exception) {}
+    }
+    return nil;
+}
+
 // The surface is derived from the controller that owns the list, not from the
 // data source class: Explore and profile reels share model types, and filtering
 // by class name was what pulled Explore into the filter.
 static RDFSurface RDFSurfaceForAdapter(id adapter, id dataSource)
 {
-    UIView *view = nil;
-    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
-        @try {
-            id candidate = [adapter valueForKey:key];
-            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
-        } @catch (__unused NSException *exception) {}
-    }
+    UIView *view = RDFAdapterCollectionView(adapter);
     if (!view) {
         for (NSString *key in @[@"collectionView", @"_collectionView"]) {
             @try {
@@ -297,23 +305,36 @@ static BOOL RDFIsPlayerControllerName(NSString *name)
 
 static BOOL RDFIsViewerContext(id adapter, id dataSource)
 {
-    UIView *view = nil;
-    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
-        @try {
-            id candidate = [adapter valueForKey:key];
-            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
-        } @catch (__unused NSException *exception) {}
-    }
+    UIView *view = RDFAdapterCollectionView(adapter);
     if (!view) return NO;
 
     UIResponder *responder = view;
-    while (responder) {
+    // 深度上限只是防响应链异常成环，正常层级远小于这个数。
+    for (NSInteger depth = 0; responder && depth < 64; depth++) {
         if ([responder isKindOfClass:[UIViewController class]]) {
             if (RDFIsPlayerControllerName(NSStringFromClass([responder class]))) return YES;
         }
         responder = [responder nextResponder];
     }
     return NO;
+}
+
+// 三处都要找当前窗口，集中一份。
+static UIWindow *RDFKeyWindow(void)
+{
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            if (candidate.isKeyWindow) return candidate;
+        }
+    }
+    return UIApplication.sharedApplication.windows.firstObject;
+}
+
+static BOOL RDFClassIsProfileFamily(UIViewController *controller)
+{
+    if (!controller) return NO;
+    return [NSStringFromClass([controller class]) containsString:@"Profile"];
 }
 
 // IG presents the reel viewer from inside a tab's navigation controller, so
@@ -330,18 +351,11 @@ static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal, BO
 {
     BOOL hasModal = NO;
     BOOL sawProfile = NO;
-    UIWindow *window = nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
-            if (candidate.isKeyWindow) { window = candidate; break; }
-        }
-    }
-    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+    UIWindow *window = RDFKeyWindow();
 
     UIViewController *controller = window.rootViewController;
     for (NSInteger depth = 0; depth < 12 && controller; depth++) {
-        if ([NSStringFromClass([controller class]) containsString:@"Profile"]) sawProfile = YES;
+        if (RDFClassIsProfileFamily(controller)) sawProfile = YES;
         UIViewController *next = nil;
 
         if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
@@ -366,7 +380,7 @@ static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal, BO
         if (!next || next == controller) break;
         controller = next;
     }
-    if (controller && [NSStringFromClass([controller class]) containsString:@"Profile"]) sawProfile = YES;
+    if (RDFClassIsProfileFamily(controller)) sawProfile = YES;
     if (outHasModal) *outHasModal = hasModal;
     if (outSawProfile) *outSawProfile = sawProfile;
     return controller;
@@ -380,36 +394,43 @@ static UIViewController *RDFResolveVisibleControllerObject(BOOL *outHasModal, BO
 // from one), so nothing on that screen may be filtered.
 static BOOL RDFWindowShowsProfile(void)
 {
-    UIWindow *window = nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
-            if (candidate.isKeyWindow) { window = candidate; break; }
-        }
-    }
-    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+    UIWindow *window = RDFKeyWindow();
     if (!window.rootViewController) return NO;
 
-    NSMutableArray<UIViewController *> *queue = [NSMutableArray arrayWithObject:window.rootViewController];
+    // 迭代深搜，深度上限 12：IG 的控制器树通常十几个节点，原来 300 个节点的
+    // 广度遍历在滚动时每次取数都会跑一遍，成本太高。navigation / tab 的
+    // childViewControllers 本身就包含栈内所有控制器，不再单独展开。
+    NSMutableArray<NSArray *> *stack = [NSMutableArray arrayWithObject:@[window.rootViewController, @0]];
     NSInteger visited = 0;
-    while (queue.count > 0 && visited < 300) {
+    while (stack.count > 0 && visited < 160) {
+        NSArray *entry = stack.lastObject;
+        [stack removeLastObject];
+        UIViewController *controller = entry[0];
+        NSInteger depth = [entry[1] integerValue];
         visited++;
-        UIViewController *controller = queue.firstObject;
-        [queue removeObjectAtIndex:0];
 
         if (controller.isViewLoaded && controller.view.window == window &&
-            [NSStringFromClass([controller class]) containsString:@"Profile"]) {
+            RDFClassIsProfileFamily(controller)) {
             return YES;
         }
 
-        if (controller.presentedViewController &&
-            !controller.presentedViewController.isBeingDismissed) {
-            [queue addObject:controller.presentedViewController];
+        // 全屏播放器会把主页的 view 从窗口上摘掉（view.window 变 nil），但
+        // present 关系还在：顺着 presentingViewController 回看是谁弹出来的，
+        // 这条判断在 view 被移除后依然成立。
+        UIViewController *presenter = controller.presentingViewController;
+        for (NSInteger hop = 0; hop < 4 && presenter; hop++) {
+            if (RDFClassIsProfileFamily(presenter)) return YES;
+            presenter = presenter.presentingViewController;
         }
-        if ([controller isKindOfClass:[UINavigationController class]]) {
-            [queue addObjectsFromArray:((UINavigationController *)controller).viewControllers];
+
+        if (depth >= 12) continue;
+        UIViewController *presented = controller.presentedViewController;
+        if (presented && !presented.isBeingDismissed) {
+            [stack addObject:@[presented, @(depth + 1)]];
         }
-        [queue addObjectsFromArray:controller.childViewControllers];
+        for (UIViewController *child in controller.childViewControllers) {
+            [stack addObject:@[child, @(depth + 1)]];
+        }
     }
     return NO;
 }
@@ -441,13 +462,7 @@ static BOOL RDFAdapterIsPlayer(id adapter)
 // view is always on screen when the user is looking at it.
 static BOOL RDFAdapterIsOffscreen(id adapter)
 {
-    UIView *view = nil;
-    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
-        @try {
-            id candidate = [adapter valueForKey:key];
-            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
-        } @catch (__unused NSException *exception) {}
-    }
+    UIView *view = RDFAdapterCollectionView(adapter);
     if (!view) return YES;
     return view.window == nil;
 }
@@ -460,19 +475,13 @@ static BOOL RDFAdapterIsOffscreen(id adapter)
 // without relying on class names or navigation stacks.
 static BOOL RDFAdapterViewInsideProfile(id adapter)
 {
-    UIView *view = nil;
-    for (NSString *key in @[@"collectionView", @"_collectionView"]) {
-        @try {
-            id candidate = [adapter valueForKey:key];
-            if ([candidate isKindOfClass:[UIView class]]) { view = candidate; break; }
-        } @catch (__unused NSException *exception) {}
-    }
+    UIView *view = RDFAdapterCollectionView(adapter);
     if (!view) return NO;
 
     UIResponder *responder = view;
-    while (responder) {
+    for (NSInteger depth = 0; responder && depth < 64; depth++) {
         if ([responder isKindOfClass:[UIViewController class]] &&
-            [NSStringFromClass([responder class]) containsString:@"Profile"]) {
+            RDFClassIsProfileFamily((UIViewController *)responder)) {
             return YES;
         }
         responder = responder.nextResponder;
@@ -566,7 +575,8 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     BOOL adapterVCIsPlayer = adapterVC &&
         RDFIsPlayerControllerName(NSStringFromClass([adapterVC class]));
     BOOL viewerContext = RDFIsViewerContext(adapter, dataSource) || RDFAdapterIsPlayer(adapter);
-    BOOL profileOnScreen = RDFWindowShowsProfile();
+    // 解析链已经经过主页时不用再扫窗口，省一次全树遍历。
+    BOOL profileOnScreen = sawProfile ? YES : RDFWindowShowsProfile();
 
     NSString *rule = @"none";
     if (sawProfile) rule = @"profilePage";
@@ -623,9 +633,11 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     if (fabs(days) < RG_FILTER_MIN_DAYS) return objects;
 
     // Profile and reels are gated by model names to avoid touching unrelated
-    // lists. Explore items are IGDiscoveryGridItem, so that gate has to be
-    // skipped there; undated items are still kept by the filter itself.
-    if (surface != RDFSurfaceSearch && !RDFLooksLikeProfileReels(dataSource, objects)) return objects;
+    // lists. Explore items are IGDiscoveryGridItem and home items are
+    // IGFeedItem, so those two surfaces skip the gate; undated items are still
+    // kept by the filter itself.
+    if (surface != RDFSurfaceSearch && surface != RDFSurfaceHome &&
+        !RDFLooksLikeProfileReels(dataSource, objects)) return objects;
 
     RGDateFilter filter = rg_filter_make(days);
     NSDate *now = [NSDate date];
@@ -645,8 +657,22 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
     }
 
     if (kept.count == 0 && objects.count > 0) {
-        // An empty profile grid makes Instagram fall back to recommendations,
-        // which look like the profile but open unrelated media. Keep the list.
+        // 「只看 N 天以前」时整页都是新内容，说明这一页确实没有符合条件的条目。
+        // 放行全量会让过滤在这一页彻底失效（用户看到的全是新内容），所以如实
+        // 返回空列表，让列表自己决定要不要继续翻页。
+        if (filter.mode == RGDateFilterOlder) {
+            @synchronized ([NSNull null]) {
+                if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
+                gRDFStats[NSStringFromClass([dataSource class])] =
+                    [NSString stringWithFormat:@"s=%ld n=%lu d=%lu k=0(更早·空) top=%@ owner=%@",
+                     (long)surface, (unsigned long)objects.count, (unsigned long)dated,
+                     topController,
+                     adapterVC ? NSStringFromClass([adapterVC class]) : @"?"];
+            }
+            return @[];
+        }
+        // 正向过滤时整页被砍光会让网格回退成推荐流（内容对不上、点开还不是同一条），
+        // 宁可保留这一页。
         @synchronized ([NSNull null]) {
             if (!gRDFStats) gRDFStats = [NSMutableDictionary dictionary];
             gRDFStats[NSStringFromClass([dataSource class])] =
@@ -668,28 +694,55 @@ static NSArray *RDFFilteredObjects(id dataSource, NSArray *objects, id adapter)
              adapterVC ? NSStringFromClass([adapterVC class]) : @"?"];
     }
 
-    return kept;
+    return [kept copy];
 }
 
 #pragma mark - Data source swizzle
 
+// 关联对象挂在被 hook 的那个类上，所以子类实例查询时要沿继承链往上找：
+// 数据源常常是 A <- B 这种继承关系，B 自己没实现该方法时，实现和 original
+// 都登记在 A 上。
+static IMP RDFOriginalIMPForClass(Class cls)
+{
+    for (Class cursor = cls; cursor; cursor = class_getSuperclass(cursor)) {
+        NSValue *stored = objc_getAssociatedObject(cursor, &kRDFOrigIMPKey);
+        if (stored) return (IMP)[stored pointerValue];
+    }
+    return NULL;
+}
+
+static BOOL RDFClassImplementsSelector(Class cls, SEL selector)
+{
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    if (!methods) return NO;
+    BOOL owns = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        if (sel_isEqual(method_getName(methods[i]), selector)) { owns = YES; break; }
+    }
+    free(methods);
+    return owns;
+}
+
 static NSArray *RDFObjectsForListAdapter(id self, SEL _cmd, id adapter)
 {
-    NSValue *stored = objc_getAssociatedObject([self class], &kRDFOrigIMPKey);
-    IMP original = stored ? (IMP)[stored pointerValue] : NULL;
-    if (!original) return nil;
+    IMP original = RDFOriginalIMPForClass([self class]);
+    // 保住底线：万一 original 被登记成了 hook 自己（子类重复安装时的老问题），
+    // 宁可不过滤也不能递归到栈溢出。
+    if (!original || original == (IMP)RDFObjectsForListAdapter) return nil;
 
     NSArray *objects = ((NSArray *(*)(id, SEL, id))original)(self, _cmd, adapter);
     if (![objects isKindOfClass:[NSArray class]] || objects.count == 0) return objects;
 
     NSArray *filtered = RDFFilteredObjects(self, objects, adapter);
     if (filtered.count != objects.count) {
+        RDFSurface surface = RDFSurfaceForAdapter(adapter, self);
         NSLog(@"[RDF] surface=%ld %@ -> %lu/%lu (days=%g)",
-              (long)RDFSurfaceForAdapter(adapter, self),
+              (long)surface,
               NSStringFromClass([self class]),
               (unsigned long)filtered.count,
               (unsigned long)objects.count,
-              RDFDaysForSurface(RDFSurfaceForAdapter(adapter, self)));
+              RDFDaysForSurface(surface));
     }
     return filtered;
 }
@@ -705,9 +758,27 @@ static void RDFInstallDataSource(id dataSource)
     Method method = class_getInstanceMethod(cls, selector);
     if (!method) return;
 
-    IMP original = method_getImplementation(method);
+    BOOL owns = RDFClassImplementsSelector(cls, selector);
+    IMP current = method_getImplementation(method);
+
+    // 子类没有自己的实现，而父类已经被 hook 过：子类实例本来就会走到父类的
+    // 替换实现，这里只需把父类的 original 登记到自己名下，绝不能再替换一次，
+    // 否则记下来的 original 就是 hook 自己，调用即无限递归。
+    if (!owns) {
+        IMP inherited = RDFOriginalIMPForClass(class_getSuperclass(cls));
+        if (inherited) {
+            objc_setAssociatedObject(cls, &kRDFOrigIMPKey,
+                                     [NSValue valueWithPointer:(const void *)inherited],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSLog(@"[RDF] data source %@ reuses superclass hook", NSStringFromClass(cls));
+            return;
+        }
+    }
+
+    if (current == (IMP)RDFObjectsForListAdapter) return;
+
     objc_setAssociatedObject(cls, &kRDFOrigIMPKey,
-                             [NSValue valueWithPointer:(const void *)original],
+                             [NSValue valueWithPointer:(const void *)current],
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     class_replaceMethod(cls, selector, (IMP)RDFObjectsForListAdapter, method_getTypeEncoding(method));
 
@@ -723,20 +794,37 @@ static void RDFInstallDataSource(id dataSource)
 
 static void RDFReloadLists(void)
 {
+    // 设置面板都在主线程，这里只是兜底：列表刷新必须回主线程。
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ RDFReloadLists(); });
+        return;
+    }
+
     id adapter = gRDFLastAdapter;
     if (!adapter) return;
+
+    // gRDFLastAdapter 只是最后一次赋数据源的那个适配器，可能属于播放器或者
+    // 已经离开屏幕的页面。对离屏列表做更新容易撞上 IGListKit 的断言，直接跳过。
+    UIView *view = RDFAdapterCollectionView(adapter);
+    if (view && view.window == nil) {
+        NSLog(@"[RDF] reload skipped: adapter offscreen");
+        return;
+    }
+
+    // completion 传 nil 时部分 IGListKit 版本不判空，给一个空 block 最稳。
+    void (^completion)(BOOL) = ^(__unused BOOL finished) {};
 
     @try {
         SEL update = NSSelectorFromString(@"performUpdatesAnimated:completion:");
         if ([adapter respondsToSelector:update]) {
             void (*call)(id, SEL, BOOL, id) = (void (*)(id, SEL, BOOL, id))objc_msgSend;
-            call(adapter, update, NO, nil);
+            call(adapter, update, NO, completion);
             return;
         }
         SEL reload = NSSelectorFromString(@"reloadDataWithCompletion:");
         if ([adapter respondsToSelector:reload]) {
             void (*call)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
-            call(adapter, reload, nil);
+            call(adapter, reload, completion);
         }
     } @catch (__unused NSException *exception) {
         NSLog(@"[RDF] reload failed: %@", exception);
@@ -1085,7 +1173,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.6.0 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.6.1 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1257,9 +1345,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 
 @interface RDFConfigurator : NSObject
 + (instancetype)shared;
-- (void)presentFrom:(UIViewController *)host;
 - (void)settingsTapped:(UIBarButtonItem *)sender;
-- (void)commitDays:(double)days;
 @end
 
 @implementation RDFConfigurator
@@ -1274,69 +1360,14 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 
 - (void)settingsTapped:(UIBarButtonItem *)sender
 {
-    UIViewController *host = objc_getAssociatedObject(sender, kRDFHostKey.UTF8String);
-    host = host ?: RDFTopViewController();
-    RDFScopeViewController *controller = [RDFScopeViewController new];
-    [host presentViewController:controller animated:YES completion:nil];
-}
-
-- (void)presentFrom:(UIViewController *)host
-{
+    // 用 NSValue 包一层弱引用：直接 ASSIGN 存控制器，设置页销毁后就是悬垂指针。
+    NSValue *boxed = objc_getAssociatedObject(sender, &kRDFHostKey);
+    UIViewController *host = [boxed nonretainedObjectValue];
+    if (!host || !host.isViewLoaded || !host.view.window) host = RDFTopViewController();
     if (!host) return;
 
-    NSString *hint =
-        @"比如输入 10 就只加载 10 天内发布的作品\n"
-        @"支持小数点\n"
-        @"比如 0.5 就是判断 12 小时内\n\n"
-        @"支持输入负数 比如 -10 只刷 10 天以前发布的视频\n"
-        @"（注意：输入过大可能无法加载出视频或功能无效）\n"
-        @"最长 1 年，最短 1 分钟。\n"
-        @"单位是天：1 小时 = 0.0417，30 分钟 = 0.021。";
-
-    UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"提示"
-                                            message:hint
-                                     preferredStyle:UIAlertControllerStyleAlert];
-
-    __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"前往输入"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        [weakSelf presentInputFrom:host];
-    }]];
-
-    [host presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)presentInputFrom:(UIViewController *)host
-{
-    RDFInputViewController *controller = [RDFInputViewController new];
-    controller.surface = RDFSurfaceProfile;
-    controller.initialDays = RDFDaysForSurface(RDFSurfaceProfile);
-    __weak typeof(self) weakSelf = self;
-    controller.onCommit = ^(double days) {
-        [weakSelf commitDays:days];
-    };
+    RDFScopeViewController *controller = [RDFScopeViewController new];
     [host presentViewController:controller animated:YES completion:nil];
-}
-
-- (void)commitDays:(double)days
-{
-    [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kRDFDaysKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-    RDFReloadLists();
-}
-
-- (void)presentError:(NSString *)message host:(UIViewController *)host
-{
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"输入无效"
-                                                                   message:message
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [host presentViewController:alert animated:YES completion:nil];
 }
 
 @end
@@ -1345,15 +1376,7 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
 
 static UIViewController *RDFTopViewController(void)
 {
-    UIWindow *window = nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
-            if (candidate.isKeyWindow) { window = candidate; break; }
-        }
-    }
-    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
-
+    UIWindow *window = RDFKeyWindow();
     UIViewController *controller = window.rootViewController;
     while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
         controller = controller.presentedViewController;
@@ -1375,7 +1398,9 @@ static void RDFAddSettingsEntry(UIViewController *controller)
                                                              style:UIBarButtonItemStylePlain
                                                             target:[RDFConfigurator shared]
                                                             action:@selector(settingsTapped:)];
-    objc_setAssociatedObject(item, kRDFHostKey.UTF8String, controller, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(item, &kRDFHostKey,
+                             [NSValue valueWithNonretainedObject:controller],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSMutableArray *items = [navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
     [items insertObject:item atIndex:0];
@@ -1481,7 +1506,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.6.0 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.6.1 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
