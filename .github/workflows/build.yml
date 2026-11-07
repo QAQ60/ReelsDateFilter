@@ -5,9 +5,14 @@ on:
   push:
     branches: [ main ]
 
+# 连续推送只跑最后一次，避免排队浪费 macOS 分钟数
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
