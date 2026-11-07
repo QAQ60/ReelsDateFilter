@@ -1166,14 +1166,14 @@ static NSString *RDFDaysSummaryForSurface(RDFSurface surface)
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     [self.view addSubview:_card];
 
-    UILabel *title = [self label:@"时间过滤" size:16.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
+    UILabel *title = [self label:@"ins时间过滤" size:16.5 weight:UIFontWeightSemibold color:UIColor.whiteColor];
     title.textAlignment = NSTextAlignmentCenter;
     title.tag = 1;
     title.userInteractionEnabled = YES;
     [title addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showDiagnostics:)]];
     [_card addSubview:title];
 
-    UILabel *subtitle = [self label:@"v1.6.1 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
+    UILabel *subtitle = [self label:@"v1.6.2 · 每个页面单独设置，开关只决定是否生效" size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.62 alpha:1]];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.tag = 2;
     [_card addSubview:subtitle];
@@ -1394,7 +1394,7 @@ static void RDFAddSettingsEntry(UIViewController *controller)
     if (!navigationItem) return;
     if (objc_getAssociatedObject(controller, &kRDFEntryKey)) return;
 
-    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithTitle:@"时间过滤"
+    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithTitle:@"ins时间过滤"
                                                              style:UIBarButtonItemStylePlain
                                                             target:[RDFConfigurator shared]
                                                             action:@selector(settingsTapped:)];
@@ -1506,7 +1506,7 @@ static id RDFInitWithLayoutUpdaterDataSource(id self, SEL _cmd, id layout, id up
 __attribute__((constructor))
 static void RDFInitialize(void)
 {
-    NSLog(@"[RDF] ReelsDateFilter v1.6.1 loaded");
+    NSLog(@"[RDF] ReelsDateFilter v1.6.2 loaded");
     Class adapterClass = objc_getClass("IGListAdapter");
     if (adapterClass) {
         SEL selector = @selector(setDataSource:);
