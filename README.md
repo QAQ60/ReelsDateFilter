@@ -15,7 +15,7 @@
 
 **TrollFools / 自签注入（推荐）**
 
-把 `ReelsDateFilter.dylib` 注入 Instagram 的 IPA 即可，无需改 plist。安装后打开 Instagram 的设置页，导航栏右上角会出现「时间过滤」按钮，不再有悬浮元素。
+把 `ReelsDateFilter.dylib` 注入 Instagram 的 IPA 即可，无需改 plist。安装后打开 Instagram 的设置页，导航栏右上角会出现「ins时间过滤」按钮，不再有悬浮元素。
 
 **越狱**
 
@@ -29,7 +29,7 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 ## 用法
 
 1. 打开 Instagram 设置（个人主页右上角菜单 → 设置）
-2. 点导航栏右上角「时间过滤」
+2. 点导航栏右上角「ins时间过滤」
 3. 弹出提示，点「前往输入」
 4. 输入天数，保存后列表立即收缩，按钮变成「10 天内」
 
@@ -55,6 +55,8 @@ scp ReelsDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLib
 ```
 
 ## 更新记录
+
+**1.6.2** —— 显示名改为「ins时间过滤」（设置页按钮、面板标题、deb 包显示名），包名 `com.qaq60.reelsdatefilter` 不变以保证覆盖升级
 
 **1.6.1** —— 代码审核修复
 
